@@ -1,0 +1,21 @@
+{
+  "name": "data_analysis",
+  "version": "1.0.0",
+  "description": "数据分析插件 - 自动分析数据文件并生成洞察",
+  "author": "AI Agent",
+  "enabled": true,
+  "tools": [
+    "quick_stats",
+    "correlation_analysis",
+    "data_quality_check"
+  ],
+  "hooks": [],
+  "dependencies": [
+    "pandas"
+  ],
+  "tags": [
+    "data",
+    "analysis",
+    "statistics"
+  ]
+}

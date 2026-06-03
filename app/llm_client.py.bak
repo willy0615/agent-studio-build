@@ -1,0 +1,41 @@
+from openai import OpenAI
+from app.config import NVIDIA_API_KEY, NVIDIA_BASE_URL, DEFAULT_MODEL
+
+
+def get_llm_client(model: str = None, temperature: float = 0.7):
+    """Create OpenAI-compatible client pointing to NVIDIA NIM."""
+    return OpenAI(
+        api_key=NVIDIA_API_KEY,
+        base_url=NVIDIA_BASE_URL,
+    )
+
+
+def chat_completion(messages: list, model: str = None, temperature: float = 0.7,
+                    stream: bool = False, **kwargs):
+    """Send chat completion request to NVIDIA NIM."""
+    client = get_llm_client()
+    model = model or DEFAULT_MODEL
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        stream=stream,
+        **kwargs,
+    )
+    return response
+
+
+def chat_stream(messages: list, model: str = None, temperature: float = 0.7, **kwargs):
+    """Stream chat completion from NVIDIA NIM."""
+    client = get_llm_client()
+    model = model or DEFAULT_MODEL
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        stream=True,
+        **kwargs,
+    )
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content

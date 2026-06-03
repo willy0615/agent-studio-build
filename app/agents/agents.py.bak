@@ -1,0 +1,124 @@
+from app.agents.prompts import SUPERVISOR_SYSTEM_PROMPT, RESEARCHER_SYSTEM_PROMPT, CODER_SYSTEM_PROMPT, ANALYST_SYSTEM_PROMPT
+from app.llm_client import chat_completion, chat_stream
+from app.tools.web_search import search_web, fetch_url
+from app.tools.code_executor import execute_code
+from app.rag.retriever import rag_retrieve
+import json
+import re
+
+
+def route_to_agent(user_message: str, model: str = None) -> str:
+    """Supervisor: determine which agent should handle the request."""
+    messages = [
+        {"role": "system", "content": SUPERVISOR_SYSTEM_PROMPT},
+        {"role": "user", "content": user_message},
+    ]
+    response = chat_completion(messages, model=model, temperature=0.1)
+    agent_name = response.choices[0].message.content.strip().lower()
+    # Validate
+    valid_agents = ["researcher", "coder", "analyst", "general"]
+    for agent in valid_agents:
+        if agent in agent_name:
+            return agent
+    return "general"
+
+
+def run_researcher(user_message: str, model: str = None, history: list = None) -> str:
+    """Research Agent: search web + RAG knowledge base."""
+    messages = [{"role": "system", "content": RESEARCHER_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    # First, get response to see if tools are needed
+    # Simple approach: always search and include context
+    search_results = search_web(user_message)
+    rag_context = rag_retrieve(user_message)
+
+    context_info = ""
+    if rag_context:
+        context_info += f"\n\nKnowledge Base Context:\n{rag_context}"
+
+    if search_results:
+        context_info += f"\n\nWeb Search Results:\n"
+        for r in search_results[:5]:
+            context_info += f"- {r['title']}: {r['snippet']}\n"
+
+    enhanced_message = user_message + context_info if context_info else user_message
+    messages[-1] = {"role": "user", "content": enhanced_message}
+
+    response = chat_completion(messages, model=model)
+    return response.choices[0].message.content
+
+
+def run_coder(user_message: str, model: str = None, history: list = None) -> str:
+    """Coder Agent: generate and execute code."""
+    messages = [{"role": "system", "content": CODER_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    response = chat_completion(messages, model=model)
+    reply = response.choices[0].message.content
+
+    # Extract and execute code blocks
+    code_blocks = re.findall(r'```python\n(.*?)```', reply, re.DOTALL)
+    execution_results = []
+    for code in code_blocks:
+        result = execute_code(code.strip())
+        exec_output = ""
+        if result["stdout"]:
+            exec_output += f"Output:\n{result['stdout']}\n"
+        if result["stderr"]:
+            exec_output += f"Errors:\n{result['stderr']}\n"
+        if exec_output:
+            execution_results.append(exec_output)
+
+    if execution_results:
+        reply += "\n\n--- Execution Results ---\n" + "\n".join(execution_results)
+
+    return reply
+
+
+def run_analyst(user_message: str, model: str = None, history: list = None) -> str:
+    """Analyst Agent: logical analysis and reasoning."""
+    messages = [{"role": "system", "content": ANALYST_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    response = chat_completion(messages, model=model)
+    return response.choices[0].message.content
+
+
+def run_general(user_message: str, model: str = None, history: list = None) -> str:
+    """General conversation handler."""
+    messages = [
+        {"role": "system", "content": "You are a helpful AI assistant. Answer concisely and clearly in the same language the user uses."},
+    ]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    response = chat_completion(messages, model=model)
+    return response.choices[0].message.content
+
+
+# Agent dispatcher
+AGENT_FUNCS = {
+    "researcher": run_researcher,
+    "coder": run_coder,
+    "analyst": run_analyst,
+    "general": run_general,
+}
+
+
+def process_message(user_message: str, model: str = None, history: list = None) -> dict:
+    """Process a message through the multi-agent system.
+
+    Returns: {"agent": str, "response": str}
+    """
+    agent_name = route_to_agent(user_message, model=model)
+    func = AGENT_FUNCS.get(agent_name, run_general)
+    response = func(user_message, model=model, history=history)
+    return {"agent": agent_name, "response": response}

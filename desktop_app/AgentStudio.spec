@@ -2,11 +2,11 @@
 
 
 a = Analysis(
-    ['main_tkinter.py'],
+    ['main.py'],
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['pywinauto', 'pywinauto.mouse', 'pywinauto.keyboard', 'PIL', 'mss', 'requests'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

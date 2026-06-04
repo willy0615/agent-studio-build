@@ -10,9 +10,6 @@ import os
 import requests
 from pathlib import Path
 
-# 添加项目路径
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextEdit, QPushButton, QLabel, QComboBox, QLineEdit, QCheckBox,
@@ -210,19 +207,28 @@ class AgentWorker(QThread):
             api_key = ""
             base_url = "https://integrate.api.nvidia.com/v1"
             
-            # 从 .env 读取
-            from dotenv import load_dotenv
-            load_dotenv()
-            
-            api_key = os.getenv("NVIDIA_API_KEY", "")
-            base_url = os.getenv("NVIDIA_BASE_URL", base_url)
-            
-            # 从用户配置读取
+            # 从 .env 读取（纯Python解析，无依赖）
+            def _load_env(fpath):
+                d = {}
+                try:
+                    for line in fpath.read_text(encoding='utf-8').splitlines():
+                        line = line.strip()
+                        if not line or line.startswith('#') or '=' not in line:
+                            continue
+                        k, v = line.split('=', 1)
+                        d[k.strip()] = v.strip().strip('"').strip("'")
+                except Exception:
+                    pass
+                return d
+            env_data = _load_env(Path('.env'))
+            api_key = env_data.get('NVIDIA_API_KEY', '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')
+            base_url = env_data.get('NVIDIA_BASE_URL', base_url)
+            # 用户配置覆盖
             settings_file = Path.home() / ".agent_studio" / "settings.env"
             if settings_file.exists():
-                load_dotenv(settings_file)
-                api_key = os.getenv("NVIDIA_API_KEY", api_key)
-                base_url = os.getenv("NVIDIA_BASE_URL", base_url)
+                udata = _load_env(settings_file)
+                api_key = udata.get('NVIDIA_API_KEY', api_key)
+                base_url = udata.get('NVIDIA_BASE_URL', base_url)
             
             if not api_key:
                 self.error_occurred.emit("API Key 未配置，请在设置页面配置 NVIDIA_API_KEY")
@@ -230,16 +236,7 @@ class AgentWorker(QThread):
             
             self.progress_update.emit("正在连接 NVIDIA API...")
             
-            # 使用 OpenAI SDK
-            try:
-                from openai import OpenAI
-            except ImportError:
-                self.error_occurred.emit("openai 库未安装，请运行: pip install openai")
-                return
-            
-            client = OpenAI(api_key=api_key, base_url=base_url)
-            
-            # 构建消息历史
+            # 使用 requests 直接调用 NVIDIA API (OpenAI compatible)
             messages = []
             for msg in self.history:
                 if msg.get("role") in ["user", "assistant"]:
@@ -248,28 +245,42 @@ class AgentWorker(QThread):
                         "content": msg["content"]
                     })
             
-            # 添加当前任务
             if self.context:
                 messages.append({
                     "role": "system",
                     "content": "上下文: " + self.context
                 })
+            else:
+                messages.insert(0, {"role": "system", "content": "你是一个有用的AI助手。请用中文回答问题。"})
             
             messages.append({"role": "user", "content": self.task})
             
             self.progress_update.emit("正在调用模型: " + self.model + "...")
             
-            # 调用 API
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=2000,
-                stream=False
+            # 用 requests 调 NVIDIA API
+            api_response = requests.post(
+                base_url + "/chat/completions",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer " + api_key
+                },
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 2000,
+                    "stream": False
+                },
+                timeout=120
             )
             
+            if api_response.status_code != 200:
+                self.error_occurred.emit(f"API 错误 ({api_response.status_code}): {api_response.text[:200]}")
+                return
+            
+            result_data = api_response.json()
             elapsed = int((time.time() - start_time) * 1000)
-            answer = response.choices[0].message.content
+            answer = result_data["choices"][0]["message"]["content"]
             
             # 根据模式模拟工具调用
             tool_calls = []
@@ -997,24 +1008,31 @@ class SettingsPage(QWidget):
             self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
     
     def load_settings(self):
-        # 从 .env 读取
-        from dotenv import load_dotenv
-        load_dotenv()
-        
-        api_key = os.getenv("NVIDIA_API_KEY", "")
-        base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        
-        self.api_key_input.setText(api_key)
-        self.base_url_input.setText(base_url)
-        
-        # 从用户配置读取（优先级更高）
+        # 纯Python解析.env，无依赖
+        def _parse_env(fpath):
+            d = {}
+            try:
+                for line in fpath.read_text(encoding='utf-8').splitlines():
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, v = line.split('=', 1)
+                    d[k.strip()] = v.strip().strip('"').strip("'")
+            except Exception:
+                pass
+            return d
+        api_key = ''
+        base_url = 'https://integrate.api.nvidia.com/v1'
+        env_data = _parse_env(Path('.env'))
+        api_key = env_data.get('NVIDIA_API_KEY', '')
+        base_url = env_data.get('NVIDIA_BASE_URL', base_url)
         settings_file = Path.home() / ".agent_studio" / "settings.env"
         if settings_file.exists():
-            load_dotenv(settings_file)
-            api_key = os.getenv("NVIDIA_API_KEY", api_key)
-            base_url = os.getenv("NVIDIA_BASE_URL", base_url)
-            self.api_key_input.setText(api_key)
-            self.base_url_input.setText(base_url)
+            udata = _parse_env(settings_file)
+            api_key = udata.get('NVIDIA_API_KEY', api_key)
+            base_url = udata.get('NVIDIA_BASE_URL', base_url)
+        self.api_key_input.setText(api_key)
+        self.base_url_input.setText(base_url)
     
     def save_settings(self):
         api_key = self.api_key_input.text().strip()

@@ -1834,29 +1834,10 @@ class SnapshotPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Agent Studio V5 - Full Feature")
-        self.setMinimumSize(1400, 900)
-        self.init_ui()
-        self.apply_theme()
-
-    def init_ui(self):
-        central = QWidget()
-        self.setCentralWidget(central)
-        ml = QHBoxLayout(central)
-        ml.setContentsMargins(0, 0, 0, 0)
-
-        sidebar = QFrame()
-        sidebar.setFixedWidth(200)
-        sidebar.setStyleSheet("background: #161b22;")
-        sl = QVBoxLayout(sidebar)
-
-        logo = QLabel("Agent Studio")
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet("color: #e6edf3; font-size: 18px; font-weight: bold; padding: 20px;")
-        sl.addWidget(logo)
-
-        self.pages = QStackedWidget()
-        nav_items = [
+        self.setWindowTitle("Agent Studio V5")
+        self.setMinimumSize(1200, 800)
+        self.advanced_mode = False
+        self.all_nav_items = [
             ("\U0001f4ac Chat", ChatPage()),
             ("\U0001f4cb Sessions", SessionsPage()),
             ("\U0001f310 Browser", BrowserPage()),
@@ -1871,40 +1852,94 @@ class MainWindow(QMainWindow):
             ("\U0001f916 Multi-Agent", MultiAgentPage()),
             ("\U0001f4f7 Snapshot", SnapshotPage()),
         ]
+        self.init_ui()
+        self.apply_theme()
 
+    def init_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        ml = QHBoxLayout(central)
+        ml.setContentsMargins(0, 0, 0, 0)
+
+        sidebar = QFrame()
+        sidebar.setFixedWidth(180)
+        sidebar.setStyleSheet("background: #161b22;")
+        sl = QVBoxLayout(sidebar)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(0)
+
+        logo = QLabel("\U0001f916 Agent Studio")
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setStyleSheet("color: #e6edf3; font-size: 15px; font-weight: bold; padding: 16px 0;")
+        sl.addWidget(logo)
+
+        self.nav_container = QWidget()
+        self.nav_layout = QVBoxLayout(self.nav_container)
+        self.nav_layout.setContentsMargins(0, 0, 0, 0)
+        self.nav_layout.setSpacing(0)
+        sl.addWidget(self.nav_container, 1)
+
+        self.pages = QStackedWidget()
         self.nav_btns = []
-        for i, (name, page) in enumerate(nav_items):
+        for i, (name, page) in enumerate(self.all_nav_items):
             btn = QPushButton(name)
             btn.setStyleSheet("""
-                QPushButton { background: transparent; color: #c9d1d9; border: none; text-align: left; padding: 10px 16px; font-size: 13px; }
+                QPushButton { background: transparent; color: #c9d1d9; border: none;
+                           text-align: left; padding: 9px 16px; font-size: 12px; }
                 QPushButton:hover { background: #21262d; }
-                QPushButton:checked { background: #21262d; color: #e6edf3; border-left: 3px solid #58a6ff; }
+                QPushButton:checked { background: #21262d; color: #e6edf3;
+                                      border-left: 3px solid #58a6ff; }
             """)
             btn.setCheckable(True)
-            btn.setChecked(i == 0)
             btn.clicked.connect(lambda _, idx=i: self._switch(idx))
-            sl.addWidget(btn)
+            self.nav_layout.addWidget(btn)
             self.nav_btns.append(btn)
             self.pages.addWidget(page)
 
         sl.addStretch()
 
-        # Status at bottom of sidebar
-        self.conn_label = QLabel("Connected" if API.base_url else "No Gateway")
-        self.conn_label.setStyleSheet("color: #3fb950; font-size: 11px; padding: 10px;")
+        self.adv_toggle = QPushButton("\U0001f527 Advanced Mode")
+        self.adv_toggle.setStyleSheet("""
+            QPushButton { background: transparent; color: #8b949e; border: none;
+                       text-align: left; padding: 9px 16px; font-size: 11px; }
+            QPushButton:hover { background: #21262d; color: #e6edf3; }
+            QPushButton:checked { color: #58a6ff; }
+        """)
+        self.adv_toggle.setCheckable(True)
+        self.adv_toggle.clicked.connect(self._toggle_advanced)
+        sl.addWidget(self.adv_toggle)
+
+        self.conn_label = QLabel("  " + ("\U0001f7e2 Connected" if API.base_url else "\U0001f534 No Gateway"))
+        self.conn_label.setStyleSheet("color: #3fb950; font-size: 11px; padding: 8px 16px;")
         if not API.base_url:
-            self.conn_label.setStyleSheet("color: #f85149; font-size: 11px; padding: 10px;")
+            self.conn_label.setStyleSheet("color: #f85149; font-size: 11px; padding: 8px 16px;")
         sl.addWidget(self.conn_label)
 
         ml.addWidget(sidebar)
-        ml.addWidget(self.pages, stretch=1)
+        ml.addWidget(self.pages, 1)
 
-        # Menu bar
         menubar = self.menuBar()
         file_menu = menubar.addMenu("File")
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
+
+        self._apply_nav_visibility()
+        self._switch(0)
+
+    def _toggle_advanced(self, checked):
+        self.advanced_mode = checked
+        self._apply_nav_visibility()
+        if not self.advanced_mode:
+            self._switch(0)
+
+    def _apply_nav_visibility(self):
+        simple_visible = {0, 8}
+        for i, btn in enumerate(self.nav_btns):
+            btn.setVisible(self.advanced_mode or i in simple_visible)
+        self.adv_toggle.setText(
+            "\U0001f527 Simple Mode" if self.advanced_mode else "\U0001f527 Advanced Mode"
+        )
 
     def _switch(self, idx):
         for i, b in enumerate(self.nav_btns):

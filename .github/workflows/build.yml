@@ -28,7 +28,7 @@ jobs:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       run: |
         cd desktop_app
-        pyinstaller --onefile --windowed --name AgentStudio `
+        pyinstaller --onefile --console --name AgentStudio_debug `
           --hidden-import PyQt6.QtCore `
           --hidden-import PyQt6.QtGui `
           --hidden-import PyQt6.QtWidgets `

@@ -23,6 +23,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller PyQt6 requests pywinauto Pillow
     
+    - name: Install VC++ Redistributable (x64)
+      run: |
+        Write-Host "Downloading VC++ Redistributable..."
+        Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile 'vc_redist.x64.exe'
+        Write-Host "Installing VC++ Redistributable..."
+        Start-Process -FilePath 'vc_redist.x64.exe' -Args '/quiet /norestart' -Wait
+        Write-Host "VC++ Redistributable installed"
+        Remove-Item 'vc_redist.x64.exe' -Force -ErrorAction SilentlyContinue
+    
     - name: Build with PyInstaller (simplified)
       env:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}

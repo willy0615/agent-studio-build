@@ -37,22 +37,32 @@ jobs:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       run: |
         cd desktop_app
-        # Build with minimal collect options
+        # Build with PyInstaller
         pyinstaller --onedir --windowed --name AgentStudio `
           --hidden-import PyQt6.QtCore `
           --hidden-import PyQt6.QtGui `
           --hidden-import PyQt6.QtWidgets `
           --hidden-import PyQt6.QtSvgWidgets `
-          --collect-submodules PyQt6.QtCore `
-          --collect-submodules PyQt6.QtGui `
-          --collect-submodules PyQt6.QtWidgets `
-          --collect-submodules PyQt6.QtSvgWidgets `
           main.py
+        
+        # Copy VCRUNTIME140.dll from system
+        Write-Host "Copying VC++ runtime DLLs..."
+        $system32 = [Environment]::GetFolderPath('System')
+        $vcDlls = @('vcruntime140.dll', 'vcruntime140_1.dll')
+        foreach ($dll in $vcDlls) {
+          $src = Join-Path $system32 $dll
+          if (Test-Path $src) {
+            Copy-Item -Path $src -Destination 'dist/AgentStudio' -Force
+            Write-Host "  Copied: $dll"
+          } else {
+            Write-Host "  WARNING: $dll not found in $system32"
+          }
+        }
         
         # Manually copy Qt platform plugins
         $sitePackages = python -c "import site; print(site.getsitepackages()[0])"
         $qtPlugins = Join-Path $sitePackages "PyQt6\Qt6\plugins"
-        $destPlugins = "dist\AgentStudio\PyQt6\Qt6\plugins"
+        $destPlugins = 'dist\AgentStudio\PyQt6\Qt6\plugins'
         
         if (Test-Path $qtPlugins) {
           Write-Host "Copying Qt plugins from: $qtPlugins"

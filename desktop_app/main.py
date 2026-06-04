@@ -22,10 +22,10 @@ from PyQt6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog, QSpinBox,
     QDoubleSpinBox, QProgressBar, QTabWidget, QPlainTextEdit, QTextBrowser,
     QInputDialog, QSizePolicy, QToolBar, QStatusBar, QMenu, QMenuBar,
-    QAbstractItemView, QTextCursor, QCompleter
+    QAbstractItemView, QCompleter
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QMutex, QBuffer, QByteArray
-from PyQt6.QtGui import QColor, QPixmap, QImage, QFont, QIcon, QAction
+from PyQt6.QtGui import QColor, QPixmap, QImage, QFont, QIcon, QAction, QTextCursor
 
 import requests
 

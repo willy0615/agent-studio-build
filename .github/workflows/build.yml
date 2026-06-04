@@ -2,7 +2,7 @@ name: Build AgentStudio.exe
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   workflow_dispatch:
 
 jobs:
@@ -24,6 +24,8 @@ jobs:
         pip install pyinstaller PyQt6 requests pywinauto Pillow
     
     - name: Build with PyInstaller
+      env:
+        NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       run: |
         cd desktop_app
         pyinstaller --onefile --windowed --name AgentStudio main.py
@@ -38,3 +40,14 @@ jobs:
     - name: Show output size
       run: |
         ls -lh desktop_app/dist/AgentStudio.exe
+        
+    - name: Create Release
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ github.run_number }}
+        name: AgentStudio V5 Build ${{ github.run_number }}
+        files: desktop_app/dist/AgentStudio.exe
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -45,15 +45,21 @@ jobs:
           --hidden-import PyQt6.QtSvgWidgets `
           main.py
         
-        # Copy VCRUNTIME140.dll from system
-        Write-Host "Copying VC++ runtime DLLs..."
-        $system32 = [Environment]::GetFolderPath('System')
+        # Copy VCRUNTIME140.dll from system (ensure 64-bit)
+        Write-Host "Copying VC++ runtime DLLs (64-bit)..."
+        $system32 = Join-Path $env:SystemRoot "System32"
         $vcDlls = @('vcruntime140.dll', 'vcruntime140_1.dll')
         foreach ($dll in $vcDlls) {
           $src = Join-Path $system32 $dll
           if (Test-Path $src) {
             Copy-Item -Path $src -Destination 'dist/AgentStudio' -Force
-            Write-Host "  Copied: $dll"
+            Write-Host "  Copied: $dll from $system32"
+            # Verify it's 64-bit
+            $dllPath = Join-Path 'dist/AgentStudio' $dll
+            $sig = Get-Content $dllPath -First 2 -Encoding Byte
+            if ($sig[0] -eq 0x4D -and $sig[1] -eq 0x5A) {
+              Write-Host "    Verified: $dll is a valid PE file"
+            }
           } else {
             Write-Host "  WARNING: $dll not found in $system32"
           }

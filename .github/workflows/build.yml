@@ -39,7 +39,7 @@ jobs:
     
     - name: Show output size
       run: |
-        ls -lh desktop_app/dist/AgentStudio.exe
+        Get-ChildItem desktop_app/dist/AgentStudio.exe | Select-Object Name, Length, LastWriteTime
         
     - name: Create Release
       if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')

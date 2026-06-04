@@ -1837,21 +1837,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Agent Studio V5")
         self.setMinimumSize(1200, 800)
         self.advanced_mode = False
+        # Lazy load: store class references, create instances on demand
         self.all_nav_items = [
-            ("\U0001f4ac Chat", ChatPage()),
-            ("\U0001f4cb Sessions", SessionsPage()),
-            ("\U0001f310 Browser", BrowserPage()),
-            ("\U0001f4e6 Skills", SkillsPage()),
-            ("\U0001f4c5 Tasks", TasksPage()),
-            ("\U0001f4bb Nodes", NodesPage()),
-            ("\U0001f4e8 Messages", MessagePage()),
-            ("\U0001f9e0 Memory", MemoryPage()),
-            ("\U0001f4c1 Files", FilesPage()),
-            ("\U0001f527 Exec", ExecPage()),
-            ("\U0001f517 Gateway", GatewayPage()),
-            ("\U0001f916 Multi-Agent", MultiAgentPage()),
-            ("\U0001f4f7 Snapshot", SnapshotPage()),
+            ("\U0001f4ac Chat", ChatPage),
+            ("\U0001f4cb Sessions", SessionsPage),
+            ("\U0001f310 Browser", BrowserPage),
+            ("\U0001f4e6 Skills", SkillsPage),
+            ("\U0001f4c5 Tasks", TasksPage),
+            ("\U0001f4bb Nodes", NodesPage),
+            ("\U0001f4e8 Messages", MessagePage),
+            ("\U0001f9e0 Memory", MemoryPage),
+            ("\U0001f4c1 Files", FilesPage),
+            ("\U0001f527 Exec", ExecPage),
+            ("\U0001f517 Gateway", GatewayPage),
+            ("\U0001f916 Multi-Agent", MultiAgentPage),
+            ("\U0001f4f7 Snapshot", SnapshotPage),
         ]
+        self._page_instances = {}
         self.init_ui()
         self.apply_theme()
 
@@ -1881,7 +1883,7 @@ class MainWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self.nav_btns = []
-        for i, (name, page) in enumerate(self.all_nav_items):
+        for i, (name, page_cls) in enumerate(self.all_nav_items):
             btn = QPushButton(name)
             btn.setStyleSheet("""
                 QPushButton { background: transparent; color: #c9d1d9; border: none;
@@ -1894,7 +1896,9 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _, idx=i: self._switch(idx))
             self.nav_layout.addWidget(btn)
             self.nav_btns.append(btn)
-            self.pages.addWidget(page)
+            # Lazy load: add placeholder widget
+            placeholder = QWidget()
+            self.pages.addWidget(placeholder)
 
         sl.addStretch()
 
@@ -1944,6 +1948,22 @@ class MainWindow(QMainWindow):
     def _switch(self, idx):
         for i, b in enumerate(self.nav_btns):
             b.setChecked(i == idx)
+        # Lazy load: create page instance on first switch
+        if idx not in self._page_instances:
+            page_cls = self.all_nav_items[idx][1]
+            try:
+                instance = page_cls()
+                self._page_instances[idx] = instance
+                # Replace placeholder with real widget
+                self.pages.removeWidget(self.pages.widget(idx))
+                self.pages.insertWidget(idx, instance)
+            except Exception as e:
+                from PyQt6.QtWidgets import QLabel
+                error_widget = QLabel(f"Error loading page: {e}")
+                error_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self._page_instances[idx] = error_widget
+                self.pages.removeWidget(self.pages.widget(idx))
+                self.pages.insertWidget(idx, error_widget)
         self.pages.setCurrentIndex(idx)
 
     def apply_theme(self):

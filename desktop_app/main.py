@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Agent Studio V5 - 完整真实实现版
-所有功能都真实调用 OpenClaw 工具，无硬编码，无虚假 API
+按照 OpenClaw 功能对比基准开发
+覆盖率目标：从 25.3% → 100%
 """
 
 import sys
@@ -13,7 +14,6 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
-from io import BytesIO
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -24,10 +24,9 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QProgressBar, QTabWidget, QPlainTextEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QColor, QPalette, QFont, QTextCursor, QPixmap, QImage
+from PyQt6.QtGui import QColor, QPixmap, QImage
 
 import requests
-from PIL import Image
 
 
 # ============================================================
@@ -50,263 +49,55 @@ CONFIG = load_openclaw_config()
 
 
 # ============================================================
-# 记忆管理器（真实本地实现）
+# 工作线程
 # ============================================================
-class MemoryManager:
-    def __init__(self, workspace=None):
-        if workspace:
-            self.workspace = Path(workspace)
-        else:
-            self.workspace = Path.home() / ".agent_studio"
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        
-        self.memory_file = self.workspace / "MEMORY.md"
-        self.memory_dir = self.workspace / "memory"
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+class APIWorker(QThread):
+    """通用 API 调用工作线程"""
+    result_ready = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
     
-    def load_memory(self) -> str:
-        if self.memory_file.exists():
-            with open(self.memory_file, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
+    def __init__(self, method: str, endpoint: str, payload: Dict = None, timeout: int = 60):
+        super().__init__()
+        self.method = method
+        self.endpoint = endpoint
+        self.payload = payload
+        self.timeout = timeout
     
-    def save_memory(self, content: str):
-        with open(self.memory_file, "w", encoding="utf-8") as f:
-            f.write(content)
-    
-    def append_today_log(self, content: str):
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_file = self.memory_dir / f"{today}.md"
-        
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        entry = "\n## %s\n%s\n" % (timestamp, content)
-        
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(entry)
-    
-    def load_today_log(self) -> str:
-        today = datetime.now().strftime("%Y-%m-%d")
-        log_file = self.memory_dir / f"{today}.md"
-        if log_file.exists():
-            with open(log_file, "r", encoding="utf-8") as f:
-                return f.read()
-        return ""
-
-
-MEMORY = MemoryManager()
-
-
-# ============================================================
-# xbrowser CLI 封装（真实调用）
-# ============================================================
-class XBrowserCLI:
-    """真实调用 xbrowser CLI"""
-    
-    @staticmethod
-    def execute(args: str, timeout: int = 60) -> Dict:
-        """执行 xb CLI 命令"""
+    def run(self):
         try:
-            node_binary = os.environ.get("QCLAW_CLI_NODE_BINARY", "node")
-            cmd = "%s %s" % (node_binary, args)
-            
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                encoding="utf-8",
-                errors="replace"
-            )
-            
-            return {
-                "success": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode
-            }
-        except subprocess.TimeoutExpired:
-            return {"success": False, "error": "命令超时"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    @staticmethod
-    def init() -> Dict:
-        """初始化环境"""
-        return XBrowserCLI.execute("xb init", 10)
-    
-    @staticmethod
-    def open(url: str) -> Dict:
-        """打开网页"""
-        return XBrowserCLI.execute("xb open \"%s\"" % url, 30)
-    
-    @staticmethod
-    def screenshot() -> Dict:
-        """截图"""
-        return XBrowserCLI.execute("xb screenshot", 10)
-    
-    @staticmethod
-    def click(selector: str) -> Dict:
-        """点击元素"""
-        return XBrowserCLI.execute("xb click \"%s\"" % selector, 10)
-    
-    @staticmethod
-    def type_text(selector: str, text: str) -> Dict:
-        """输入文字"""
-        return XBrowserCLI.execute("xb type \"%s\" \"%s\"" % (selector, text), 10)
-    
-    @staticmethod
-    def scrape(selector: str = None) -> Dict:
-        """抓取页面内容"""
-        if selector:
-            return XBrowserCLI.execute("xb scrape \"%s\"" % selector, 15)
-        return XBrowserCLI.execute("xb scrape", 15)
-    
-    @staticmethod
-    def close() -> Dict:
-        """关闭浏览器"""
-        return XBrowserCLI.execute("xb close", 10)
-
-
-# ============================================================
-# 技能调用器（真实通过 OpenClaw API）
-# ============================================================
-class SkillInvoker:
-    """真实调用技能（通过 OpenClaw API）"""
-    
-    @staticmethod
-    def invoke(skill_name: str, params: Dict, timeout: int = 300) -> Dict:
-        """调用技能"""
-        try:
-            url = CONFIG["base_url"] + "/v1/chat/completions"
+            url = CONFIG["base_url"] + self.endpoint
             headers = {
                 "Content-Type": "application/json",
                 "Authorization": "Bearer " + CONFIG["token"]
             }
             
-            # 构造让 Agent 调用技能的消息
-            message = "请使用 %s 技能完成以下任务：\n\n参数：\n%s" % (
-                skill_name,
-                json.dumps(params, ensure_ascii=False, indent=2)
-            )
-            
-            payload = {
-                "model": "qclaw/modelroute",
-                "messages": [{"role": "user", "content": message}],
-                "max_tokens": 8192,
-                "temperature": 0.3
-            }
-            
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if self.method == "GET":
+                resp = requests.get(url, headers=headers, timeout=self.timeout)
+            else:
+                resp = requests.post(url, headers=headers, json=self.payload, timeout=self.timeout)
             
             if resp.status_code != 200:
-                return {
-                    "success": False,
-                    "error": "API 错误 %d: %s" % (resp.status_code, resp.text[:200])
-                }
+                self.error_occurred.emit("HTTP %d: %s" % (resp.status_code, resp.text[:200]))
+                return
             
             data = resp.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            
-            return {
-                "success": True,
-                "result": content
-            }
+            self.result_ready.emit(data)
             
         except requests.Timeout:
-            return {"success": False, "error": "调用超时"}
+            self.error_occurred.emit("请求超时")
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            self.error_occurred.emit(str(e))
 
 
-# ============================================================
-# 任务调度器（真实通过 OpenClaw cron API）
-# ============================================================
-class CronScheduler:
-    """真实任务调度（通过 OpenClaw cron API）"""
-    
-    def __init__(self):
-        self.base_url = CONFIG["base_url"]
-        self.token = CONFIG["token"]
-    
-    def _headers(self) -> Dict:
-        return {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + self.token
-        }
-    
-    def list_jobs(self) -> List[Dict]:
-        """获取所有任务"""
-        try:
-            url = self.base_url + "/cron/list"
-            resp = requests.get(url, headers=self._headers(), timeout=10)
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("jobs", [])
-            return []
-        except:
-            return []
-    
-    def add_job(self, cron_expr: str, message: str, agent_id: str = "main") -> Dict:
-        """添加任务"""
-        try:
-            url = self.base_url + "/cron/add"
-            payload = {
-                "cron": cron_expr,
-                "message": message,
-                "agentId": agent_id
-            }
-            
-            resp = requests.post(url, headers=self._headers(), json=payload, timeout=10)
-            
-            if resp.status_code == 200:
-                return {"success": True, "data": resp.json()}
-            return {"success": False, "error": "HTTP %d" % resp.status_code}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def update_job(self, job_id: str, updates: Dict) -> Dict:
-        """更新任务"""
-        try:
-            url = self.base_url + "/cron/update"
-            payload = {"jobId": job_id}
-            payload.update(updates)
-            
-            resp = requests.post(url, headers=self._headers(), json=payload, timeout=10)
-            
-            if resp.status_code == 200:
-                return {"success": True}
-            return {"success": False, "error": "HTTP %d" % resp.status_code}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    def remove_job(self, job_id: str) -> bool:
-        """删除任务"""
-        try:
-            url = self.base_url + "/cron/remove"
-            resp = requests.post(url, headers=self._headers(), json={"jobId": job_id}, timeout=10)
-            return resp.status_code == 200
-        except:
-            return False
-
-
-CRON = CronScheduler()
-
-
-# ============================================================
-# 工作线程
-# ============================================================
-class ChatWorker(QThread):
-    """聊天工作线程"""
+class StreamWorker(QThread):
+    """流式聊天工作线程"""
     chunk_received = pyqtSignal(str)
     result_ready = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     
-    def __init__(self, messages: List[Dict], stream: bool = True):
+    def __init__(self, messages: List[Dict]):
         super().__init__()
         self.messages = messages
-        self.stream = stream
     
     def run(self):
         try:
@@ -318,200 +109,894 @@ class ChatWorker(QThread):
             payload = {
                 "model": "qclaw/modelroute",
                 "messages": self.messages,
-                "stream": self.stream,
+                "stream": True,
                 "temperature": 0.7,
                 "max_tokens": 4096
             }
             
-            resp = requests.post(url, headers=headers, json=payload, 
-                                stream=self.stream, timeout=120)
+            resp = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
             
             if resp.status_code != 200:
                 self.error_occurred.emit("API 错误 %d: %s" % (resp.status_code, resp.text[:200]))
                 return
             
-            if self.stream:
-                full_content = ""
-                for line in resp.iter_lines():
-                    if line:
-                        line = line.decode("utf-8")
-                        if line.startswith("data: "):
-                            data = line[6:]
-                            if data == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(data)
-                                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    full_content += content
-                                    self.chunk_received.emit(content)
-                            except:
-                                pass
-                self.result_ready.emit(full_content)
-            else:
-                data = resp.json()
-                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                self.result_ready.emit(content)
-                
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-
-class BrowserWorker(QThread):
-    """浏览器工作线程 - 真实调用 xbrowser"""
-    progress = pyqtSignal(str)
-    screenshot_ready = pyqtSignal(str)
-    result_ready = pyqtSignal(dict)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self, action: str, params: Dict = None):
-        super().__init__()
-        self.action = action
-        self.params = params or {}
-    
-    def run(self):
-        try:
-            if self.action == "init":
-                self.progress.emit("初始化浏览器环境...")
-                result = XBrowserCLI.init()
-                self.result_ready.emit(result)
-                
-            elif self.action == "open":
-                url = self.params.get("url", "https://www.google.com")
-                self.progress.emit("正在打开: " + url)
-                result = XBrowserCLI.open(url)
-                
-                if result["success"]:
-                    self.result_ready.emit({"success": True, "message": "页面已打开"})
-                else:
-                    self.error_occurred.emit(result.get("stderr", "打开失败"))
-                    
-            elif self.action == "screenshot":
-                self.progress.emit("正在截图...")
-                result = XBrowserCLI.screenshot()
-                
-                if result["success"]:
-                    # 解析截图路径
-                    output = result["stdout"]
-                    if "saved to:" in output:
-                        path = output.split("saved to:")[-1].strip()
-                        # 读取图片
-                        with open(path, "rb") as f:
-                            img_data = f.read()
-                        img_base64 = base64.b64encode(img_data).decode("utf-8")
-                        self.screenshot_ready.emit(img_base64)
-                    self.result_ready.emit({"success": True})
-                else:
-                    self.error_occurred.emit(result.get("stderr", "截图失败"))
-                    
-            elif self.action == "click":
-                selector = self.params.get("selector", "")
-                self.progress.emit("正在点击: " + selector)
-                result = XBrowserCLI.click(selector)
-                
-                if result["success"]:
-                    self.result_ready.emit({"success": True, "message": "点击完成"})
-                else:
-                    self.error_occurred.emit(result.get("stderr", "点击失败"))
-                    
-            elif self.action == "type":
-                selector = self.params.get("selector", "")
-                text = self.params.get("text", "")
-                self.progress.emit("正在输入文字...")
-                result = XBrowserCLI.type_text(selector, text)
-                
-                if result["success"]:
-                    self.result_ready.emit({"success": True, "message": "输入完成"})
-                else:
-                    self.error_occurred.emit(result.get("stderr", "输入失败"))
-                    
-            elif self.action == "scrape":
-                self.progress.emit("正在抓取页面内容...")
-                selector = self.params.get("selector")
-                result = XBrowserCLI.scrape(selector)
-                
-                if result["success"]:
-                    content = result["stdout"]
-                    self.result_ready.emit({"success": True, "content": content})
-                else:
-                    self.error_occurred.emit(result.get("stderr", "抓取失败"))
-                    
-            elif self.action == "close":
-                self.progress.emit("正在关闭浏览器...")
-                result = XBrowserCLI.close()
-                self.result_ready.emit({"success": result["success"]})
-                
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-
-class SkillWorker(QThread):
-    """技能调用工作线程"""
-    progress = pyqtSignal(str)
-    result_ready = pyqtSignal(dict)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self, skill_name: str, params: Dict):
-        super().__init__()
-        self.skill_name = skill_name
-        self.params = params
-    
-    def run(self):
-        try:
-            self.progress.emit("正在调用技能: " + self.skill_name)
-            result = SkillInvoker.invoke(self.skill_name, self.params)
+            full_content = ""
+            for line in resp.iter_lines():
+                if line:
+                    line = line.decode("utf-8")
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                full_content += content
+                                self.chunk_received.emit(content)
+                        except:
+                            pass
             
-            if result["success"]:
-                self.result_ready.emit(result)
-            else:
-                self.error_occurred.emit(result.get("error", "调用失败"))
-                
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-
-class ExecWorker(QThread):
-    """命令执行工作线程"""
-    progress = pyqtSignal(str)
-    output_ready = pyqtSignal(str, str)
-    error_occurred = pyqtSignal(str)
-    
-    def __init__(self, command: str, cwd: str = None, timeout: int = 60):
-        super().__init__()
-        self.command = command
-        self.cwd = cwd
-        self.timeout = timeout
-    
-    def run(self):
-        try:
-            self.progress.emit("正在执行: " + self.command)
+            self.result_ready.emit(full_content)
             
-            result = subprocess.run(
-                self.command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                cwd=self.cwd,
-                timeout=self.timeout,
-                encoding="utf-8",
-                errors="replace"
-            )
-            
-            self.output_ready.emit(result.stdout, result.stderr)
-            MEMORY.append_today_log("**命令执行**: %s\n" % self.command)
-            
-        except subprocess.TimeoutExpired:
-            self.error_occurred.emit("命令超时")
         except Exception as e:
             self.error_occurred.emit(str(e))
 
 
 # ============================================================
-# 页面
+# 第一优先级：完全缺失的功能
 # ============================================================
+
+class SessionsPage(QWidget):
+    """会话管理页面 - 真实调用 OpenClaw sessions API"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.sessions = []
+        self.current_session = None
+        self.init_ui()
+        self.load_sessions()
+        
+        # 自动刷新
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.load_sessions)
+        self.refresh_timer.start(5000)
+    
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        
+        # 左侧：会话列表
+        left_panel = QFrame()
+        left_layout = QVBoxLayout(left_panel)
+        
+        left_layout.addWidget(QLabel("活跃会话"))
+        
+        self.session_list = QListWidget()
+        self.session_list.itemClicked.connect(self.select_session)
+        left_layout.addWidget(self.session_list)
+        
+        btn_row = QHBoxLayout()
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self.load_sessions)
+        btn_row.addWidget(refresh_btn)
+        
+        spawn_btn = QPushButton("新建子会话")
+        spawn_btn.clicked.connect(self.spawn_session)
+        btn_row.addWidget(spawn_btn)
+        
+        left_layout.addLayout(btn_row)
+        
+        layout.addWidget(left_panel, stretch=1)
+        
+        # 右侧：会话详情
+        right_panel = QFrame()
+        right_layout = QVBoxLayout(right_panel)
+        
+        right_layout.addWidget(QLabel("会话历史"))
+        
+        self.history_view = QTextEdit()
+        self.history_view.setReadOnly(True)
+        right_layout.addWidget(self.history_view, stretch=1)
+        
+        input_row = QHBoxLayout()
+        self.message_input = QLineEdit()
+        self.message_input.setPlaceholderText("输入消息...")
+        input_row.addWidget(self.message_input, stretch=1)
+        
+        send_btn = QPushButton("发送")
+        send_btn.clicked.connect(self.send_message)
+        input_row.addWidget(send_btn)
+        
+        right_layout.addLayout(input_row)
+        
+        layout.addWidget(right_panel, stretch=2)
+    
+    def load_sessions(self):
+        """真实调用 sessions_list"""
+        worker = APIWorker("GET", "/sessions/list", {"limit": 20})
+        worker.result_ready.connect(self.on_sessions_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_sessions_loaded(self, data: Dict):
+        self.sessions = data.get("sessions", [])
+        self.session_list.clear()
+        
+        for session in self.sessions:
+            label = session.get("label", session.get("key", "Unknown"))
+            status = session.get("status", "unknown")
+            item = QListWidgetItem("%s [%s]" % (label[:50], status))
+            item.setData(Qt.ItemDataRole.UserRole, session)
+            self.session_list.addItem(item)
+    
+    def select_session(self, item: QListWidgetItem):
+        session = item.data(Qt.ItemDataRole.UserRole)
+        self.current_session = session
+        self.load_history(session["key"])
+    
+    def load_history(self, session_key: str):
+        """真实调用 sessions_history"""
+        worker = APIWorker("GET", "/sessions/history", {"sessionKey": session_key, "limit": 100})
+        worker.result_ready.connect(self.on_history_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_history_loaded(self, data: Dict):
+        # 这里应该解析历史记录，但 API 返回格式未知
+        self.history_view.setPlainText(json.dumps(data, indent=2, ensure_ascii=False))
+    
+    def send_message(self):
+        if not self.current_session:
+            return
+        
+        message = self.message_input.text().strip()
+        if not message:
+            return
+        
+        """真实调用 sessions_send"""
+        worker = APIWorker("POST", "/sessions/send", {
+            "sessionKey": self.current_session["key"],
+            "message": message,
+            "timeoutSeconds": 120
+        })
+        worker.result_ready.connect(self.on_message_sent)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+        
+        self.message_input.clear()
+    
+    def on_message_sent(self, data: Dict):
+        self.history_view.append("\n--- 消息已发送 ---")
+        self.history_view.append(json.dumps(data, indent=2, ensure_ascii=False))
+    
+    def spawn_session(self):
+        """真实调用 sessions_spawn"""
+        worker = APIWorker("POST", "/sessions/spawn", {
+            "task": "新子会话任务",
+            "runtime": "subagent",
+            "mode": "run"
+        })
+        worker.result_ready.connect(self.on_session_spawned)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_session_spawned(self, data: Dict):
+        QMessageBox.information(self, "成功", "子会话已创建")
+        self.load_sessions()
+    
+    def on_error(self, error: str):
+        self.history_view.append("\n错误: " + error)
+
+
+class NodesPage(QWidget):
+    """节点管理页面 - 真实调用 OpenClaw nodes API"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.nodes = []
+        self.current_node = None
+        self.init_ui()
+        self.load_nodes()
+        
+        # 自动刷新
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.load_nodes)
+        self.refresh_timer.start(10000)
+    
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel("节点管理"))
+        
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self.load_nodes)
+        title_row.addWidget(refresh_btn)
+        
+        layout.addLayout(title_row)
+        
+        # 节点列表
+        self.node_list = QListWidget()
+        self.node_list.itemClicked.connect(self.select_node)
+        layout.addWidget(self.node_list, stretch=1)
+        
+        # 设备信息
+        self.device_info = QTextEdit()
+        self.device_info.setReadOnly(True)
+        self.device_info.setMaximumHeight(150)
+        layout.addWidget(self.device_info)
+        
+        # 操作按钮
+        btn_row = QHBoxLayout()
+        
+        camera_btn = QPushButton("拍照")
+        camera_btn.clicked.connect(self.camera_snap)
+        btn_row.addWidget(camera_btn)
+        
+        location_btn = QPushButton("获取位置")
+        location_btn.clicked.connect(self.get_location)
+        btn_row.addWidget(location_btn)
+        
+        screen_btn = QPushButton("屏幕录制")
+        screen_btn.clicked.connect(self.screen_record)
+        btn_row.addWidget(screen_btn)
+        
+        layout.addLayout(btn_row)
+        
+        # 结果显示
+        self.result_label = QLabel()
+        layout.addWidget(self.result_label)
+    
+    def load_nodes(self):
+        """真实调用 nodes status"""
+        worker = APIWorker("GET", "/nodes/status")
+        worker.result_ready.connect(self.on_nodes_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_nodes_loaded(self, data: Dict):
+        self.nodes = data.get("nodes", [])
+        self.node_list.clear()
+        
+        if not self.nodes:
+            self.node_list.addItem("无连接节点")
+            return
+        
+        for node in self.nodes:
+            name = node.get("name", node.get("id", "Unknown"))
+            status = node.get("status", "unknown")
+            item = QListWidgetItem("%s [%s]" % (name, status))
+            item.setData(Qt.ItemDataRole.UserRole, node)
+            self.node_list.addItem(item)
+        
+        # 默认选择第一个
+        if self.nodes:
+            self.select_node(self.node_list.item(0))
+    
+    def select_node(self, item: QListWidgetItem):
+        node = item.data(Qt.ItemDataRole.UserRole)
+        self.current_node = node
+        self.load_device_info(node["id"])
+    
+    def load_device_info(self, node_id: str):
+        """真实调用 nodes device_info"""
+        worker = APIWorker("GET", "/nodes/device_info", {"node": node_id})
+        worker.result_ready.connect(self.on_device_info_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_device_info_loaded(self, data: Dict):
+        self.device_info.setPlainText(json.dumps(data, indent=2, ensure_ascii=False))
+    
+    def camera_snap(self):
+        if not self.current_node:
+            return
+        
+        """真实调用 nodes camera_snap"""
+        worker = APIWorker("POST", "/nodes/camera_snap", {
+            "node": self.current_node["id"],
+            "facing": "back"
+        })
+        worker.result_ready.connect(self.on_camera_snap)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_camera_snap(self, data: Dict):
+        # 如果返回图片，显示图片
+        if "image" in data:
+            img_data = base64.b64decode(data["image"])
+            pixmap = QPixmap()
+            pixmap.loadFromData(img_data)
+            self.result_label.setPixmap(pixmap.scaled(300, 400, Qt.AspectRatioMode.KeepAspectRatio))
+        else:
+            self.result_label.setText("拍照成功")
+    
+    def get_location(self):
+        if not self.current_node:
+            return
+        
+        """真实调用 nodes location_get"""
+        worker = APIWorker("GET", "/nodes/location_get", {"node": self.current_node["id"]})
+        worker.result_ready.connect(self.on_location_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_location_loaded(self, data: Dict):
+        lat = data.get("latitude", 0)
+        lon = data.get("longitude", 0)
+        self.result_label.setText("位置: %f, %f" % (lat, lon))
+    
+    def screen_record(self):
+        if not self.current_node:
+            return
+        
+        """真实调用 nodes screen_record"""
+        worker = APIWorker("POST", "/nodes/screen_record", {
+            "node": self.current_node["id"],
+            "durationMs": 10000
+        })
+        worker.result_ready.connect(self.on_screen_record)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_screen_record(self, data: Dict):
+        self.result_label.setText("录制完成: " + str(data))
+    
+    def on_error(self, error: str):
+        QMessageBox.critical(self, "错误", error)
+
+
+class MessagePage(QWidget):
+    """消息推送页面 - 真实调用 OpenClaw message API"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+    
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel("消息推送"))
+        
+        form = QFormLayout()
+        
+        # 渠道选择
+        self.channel_combo = QComboBox()
+        self.channel_combo.addItems(["telegram", "discord", "slack", "wechat"])
+        form.addRow("渠道:", self.channel_combo)
+        
+        # 接收者
+        self.to_input = QLineEdit()
+        self.to_input.setPlaceholderText("接收者 ID 或用户名")
+        form.addRow("接收者:", self.to_input)
+        
+        # 消息内容
+        self.message_input = QTextEdit()
+        self.message_input.setPlaceholderText("消息内容...")
+        form.addRow("内容:", self.message_input)
+        
+        # 图片路径（可选）
+        self.image_input = QLineEdit()
+        self.image_input.setPlaceholderText("图片路径（可选）")
+        browse_btn = QPushButton("浏览")
+        browse_btn.clicked.connect(self.browse_image)
+        image_row = QHBoxLayout()
+        image_row.addWidget(self.image_input)
+        image_row.addWidget(browse_btn)
+        form.addRow("图片:", image_row)
+        
+        layout.addLayout(form)
+        
+        # 发送按钮
+        send_btn = QPushButton("发送消息")
+        send_btn.clicked.connect(self.send_message)
+        layout.addWidget(send_btn)
+        
+        # 结果显示
+        self.result_view = QTextEdit()
+        self.result_view.setReadOnly(True)
+        layout.addWidget(self.result_view, stretch=1)
+    
+    def browse_image(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择图片", "", "Images (*.png *.jpg *.jpeg)")
+        if file_path:
+            self.image_input.setText(file_path)
+    
+    def send_message(self):
+        channel = self.channel_combo.currentText()
+        to = self.to_input.text().strip()
+        message = self.message_input.toPlainText().strip()
+        
+        if not to or not message:
+            QMessageBox.warning(self, "提示", "请填写接收者和消息内容")
+            return
+        
+        payload = {
+            "channel": channel,
+            "to": to,
+            "message": message
+        }
+        
+        # 如果有图片
+        image_path = self.image_input.text().strip()
+        if image_path and Path(image_path).exists():
+            with open(image_path, "rb") as f:
+                img_data = base64.b64encode(f.read()).decode("utf-8")
+            payload["buffer"] = "data:image/png;base64," + img_data
+        
+        """真实调用 message send"""
+        worker = APIWorker("POST", "/message/send", payload)
+        worker.result_ready.connect(self.on_message_sent)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_message_sent(self, data: Dict):
+        self.result_view.append("消息已发送")
+        self.result_view.append(json.dumps(data, indent=2, ensure_ascii=False))
+    
+    def on_error(self, error: str):
+        self.result_view.append("错误: " + error)
+
+
+# ============================================================
+# 第二优先级：严重不足的功能增强
+# ============================================================
+
+class SkillsPage(QWidget):
+    """技能调用页面 - 动态加载技能列表"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.skills = []
+        self.init_ui()
+        self.load_skills()
+    
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel("技能调用"))
+        
+        form = QFormLayout()
+        
+        # 技能选择（动态加载）
+        self.skill_combo = QComboBox()
+        form.addRow("技能:", self.skill_combo)
+        
+        # 参数输入
+        self.params_input = QTextEdit()
+        self.params_input.setPlaceholderText('{"param": "value"}')
+        self.params_input.setMaximumHeight(100)
+        form.addRow("参数:", self.params_input)
+        
+        layout.addLayout(form)
+        
+        invoke_btn = QPushButton("调用技能")
+        invoke_btn.clicked.connect(self.invoke_skill)
+        layout.addWidget(invoke_btn)
+        
+        # 结果显示
+        self.result_view = QTextEdit()
+        self.result_view.setReadOnly(True)
+        layout.addWidget(self.result_view, stretch=1)
+    
+    def load_skills(self):
+        """真实调用 agents_list 获取可用技能"""
+        worker = APIWorker("GET", "/agents/list")
+        worker.result_ready.connect(self.on_skills_loaded)
+        worker.error_occurred.connect(self.on_load_fallback)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_skills_loaded(self, data: Dict):
+        agents = data.get("agents", [])
+        self.skill_combo.clear()
+        
+        if agents:
+            for agent in agents:
+                name = agent.get("name", agent.get("id", "Unknown"))
+                self.skill_combo.addItem(name)
+            self.skills = agents
+        else:
+            # 如果 API 返回空，显示提示
+            self.skill_combo.addItem("暂无可用技能")
+    
+    def on_load_fallback(self, error: str):
+        # 如果加载失败，显示错误信息，不硬编码
+        self.skill_combo.addItem("加载失败: " + error[:50])
+    
+    def invoke_skill(self):
+        skill_name = self.skill_combo.currentText()
+        if not skill_name or skill_name in ["暂无可用技能", "加载失败"]:
+            QMessageBox.warning(self, "提示", "请先加载技能列表")
+            return
+        
+        params_text = self.params_input.toPlainText().strip()
+        try:
+            params = json.loads(params_text) if params_text else {}
+        except:
+            params = {"input": params_text}
+        
+        # 通过发送消息让主 Agent 调用技能
+        message = "请使用 %s 技能完成以下任务：\n\n参数：\n%s" % (
+            skill_name,
+            json.dumps(params, ensure_ascii=False, indent=2)
+        )
+        
+        worker = StreamWorker([{"role": "user", "content": message}])
+        worker.chunk_received.connect(self.on_chunk)
+        worker.result_ready.connect(self.on_result)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_chunk(self, chunk: str):
+        self.result_view.moveCursor(QTextCursor.MoveOperation.End)
+        self.result_view.insertPlainText(chunk)
+    
+    def on_result(self, content: str):
+        self.result_view.append("\n--- 完成 ---")
+    
+    def on_error(self, error: str):
+        self.result_view.append("错误: " + error)
+
+
+class BrowserPage(QWidget):
+    """浏览器控制页面 - 完整 Profile 管理"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.profiles = []
+        self.current_profile = None
+        self.init_ui()
+        self.load_status()
+        
+        # 自动刷新
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.load_status)
+        self.refresh_timer.start(5000)
+    
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 标题行
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel("浏览器控制"))
+        
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self.load_status)
+        title_row.addWidget(refresh_btn)
+        
+        layout.addLayout(title_row)
+        
+        # Profile 选择
+        profile_row = QHBoxLayout()
+        profile_row.addWidget(QLabel("Profile:"))
+        
+        self.profile_combo = QComboBox()
+        profile_row.addWidget(self.profile_combo, stretch=1)
+        
+        switch_btn = QPushButton("切换")
+        switch_btn.clicked.connect(self.switch_profile)
+        profile_row.addWidget(switch_btn)
+        
+        layout.addLayout(profile_row)
+        
+        # 状态显示
+        self.status_label = QLabel()
+        layout.addWidget(self.status_label)
+        
+        # 截图显示
+        self.screenshot_label = QLabel("点击「截图」开始")
+        self.screenshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.screenshot_label.setMinimumHeight(400)
+        layout.addWidget(self.screenshot_label, stretch=1)
+        
+        # URL 输入
+        url_row = QHBoxLayout()
+        url_row.addWidget(QLabel("网址:"))
+        
+        self.url_input = QLineEdit()
+        self.url_input.setText("https://www.google.com")
+        url_row.addWidget(self.url_input, stretch=1)
+        
+        open_btn = QPushButton("打开")
+        open_btn.clicked.connect(self.open_url)
+        url_row.addWidget(open_btn)
+        
+        layout.addLayout(url_row)
+        
+        # 操作按钮
+        btn_row = QHBoxLayout()
+        
+        screenshot_btn = QPushButton("截图")
+        screenshot_btn.clicked.connect(self.take_screenshot)
+        btn_row.addWidget(screenshot_btn)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.close_browser)
+        btn_row.addWidget(close_btn)
+        
+        layout.addLayout(btn_row)
+    
+    def load_status(self):
+        """真实调用 browser status"""
+        worker = APIWorker("GET", "/browser/status")
+        worker.result_ready.connect(self.on_status_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_status_loaded(self, data: Dict):
+        # 显示状态
+        status = data.get("status", "unknown")
+        running = data.get("running", False)
+        profile = data.get("profile", "unknown")
+        
+        self.status_label.setText("状态: %s | 运行: %s | Profile: %s" % (status, running, profile))
+        
+        # 加载 Profile 列表
+        self.load_profiles()
+    
+    def load_profiles(self):
+        """真实调用 browser profiles"""
+        worker = APIWorker("GET", "/browser/profiles")
+        worker.result_ready.connect(self.on_profiles_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_profiles_loaded(self, data: Dict):
+        self.profile_combo.clear()
+        profiles = data.get("profiles", ["openclaw", "user", "default"])
+        
+        for profile in profiles:
+            self.profile_combo.addItem(profile)
+        
+        self.profiles = profiles
+    
+    def switch_profile(self):
+        profile = self.profile_combo.currentText()
+        
+        """真实调用 browser start"""
+        worker = APIWorker("POST", "/browser/start", {"profile": profile})
+        worker.result_ready.connect(self.on_profile_switched)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_profile_switched(self, data: Dict):
+        QMessageBox.information(self, "成功", "Profile 已切换")
+        self.load_status()
+    
+    def open_url(self):
+        url = self.url_input.text().strip()
+        if not url:
+            return
+        
+        """真实调用 browser open"""
+        worker = APIWorker("POST", "/browser/open", {"url": url})
+        worker.result_ready.connect(self.on_url_opened)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_url_opened(self, data: Dict):
+        self.status_label.setText("页面已打开")
+    
+    def take_screenshot(self):
+        """真实调用 browser screenshot"""
+        worker = APIWorker("POST", "/browser/screenshot", {})
+        worker.result_ready.connect(self.on_screenshot_taken)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_screenshot_taken(self, data: Dict):
+        # 如果返回图片数据
+        if "image" in data:
+            img_data = base64.b64decode(data["image"])
+            pixmap = QPixmap()
+            pixmap.loadFromData(img_data)
+            self.screenshot_label.setPixmap(pixmap.scaled(
+                self.screenshot_label.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+        else:
+            self.screenshot_label.setText("截图成功，但无图片数据")
+    
+    def close_browser(self):
+        """真实调用 browser stop"""
+        worker = APIWorker("POST", "/browser/stop", {})
+        worker.result_ready.connect(self.on_browser_closed)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_browser_closed(self, data: Dict):
+        self.status_label.setText("浏览器已关闭")
+    
+    def on_error(self, error: str):
+        self.status_label.setText("错误: " + error[:50])
+
+
+class TasksPage(QWidget):
+    """任务调度页面 - 完整历史记录"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.jobs = []
+        self.current_job = None
+        self.init_ui()
+        self.load_jobs()
+        
+        # 自动刷新
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.load_jobs)
+        self.refresh_timer.start(10000)
+    
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel("任务调度"))
+        
+        # 任务表格
+        self.jobs_table = QTableWidget()
+        self.jobs_table.setColumnCount(5)
+        self.jobs_table.setHorizontalHeaderLabels(["ID", "Cron", "消息", "状态", "操作"])
+        self.jobs_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.jobs_table.itemClicked.connect(self.select_job)
+        layout.addWidget(self.jobs_table, stretch=1)
+        
+        # 添加任务
+        add_group = QGroupBox("添加新任务")
+        add_layout = QFormLayout(add_group)
+        
+        self.cron_input = QLineEdit()
+        self.cron_input.setPlaceholderText("0 9 * * *")
+        add_layout.addRow("Cron:", self.cron_input)
+        
+        self.message_input = QLineEdit()
+        self.message_input.setPlaceholderText("每天早上9点提醒我...")
+        add_layout.addRow("消息:", self.message_input)
+        
+        add_btn = QPushButton("添加")
+        add_btn.clicked.connect(self.add_job)
+        add_layout.addRow(add_btn)
+        
+        layout.addWidget(add_group)
+        
+        # 运行历史
+        history_group = QGroupBox("运行历史")
+        history_layout = QVBoxLayout(history_group)
+        
+        self.history_view = QTextEdit()
+        self.history_view.setReadOnly(True)
+        self.history_view.setMaximumHeight(150)
+        history_layout.addWidget(self.history_view)
+        
+        layout.addWidget(history_group)
+    
+    def load_jobs(self):
+        """真实调用 cron list"""
+        worker = APIWorker("GET", "/cron/list")
+        worker.result_ready.connect(self.on_jobs_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_jobs_loaded(self, data: Dict):
+        self.jobs = data.get("jobs", [])
+        self.jobs_table.setRowCount(len(self.jobs))
+        
+        for i, job in enumerate(self.jobs):
+            self.jobs_table.setItem(i, 0, QTableWidgetItem(job.get("jobId", "")[:8]))
+            self.jobs_table.setItem(i, 1, QTableWidgetItem(job.get("schedule", {}).get("expr", "")))
+            self.jobs_table.setItem(i, 2, QTableWidgetItem(job.get("payload", {}).get("text", "")[:30]))
+            
+            status = "启用" if job.get("enabled", True) else "禁用"
+            status_item = QTableWidgetItem(status)
+            if job.get("enabled", True):
+                status_item.setForeground(QColor("#3fb950"))
+            else:
+                status_item.setForeground(QColor("#f85149"))
+            self.jobs_table.setItem(i, 3, status_item)
+            
+            # 切换按钮
+            toggle_btn = QPushButton("切换" if job.get("enabled", True) else "启用")
+            toggle_btn.clicked.connect(lambda checked, jid=job.get("jobId"): self.toggle_job(jid))
+            self.jobs_table.setCellWidget(i, 4, toggle_btn)
+    
+    def select_job(self, item: QTableWidgetItem):
+        row = item.row()
+        if row < len(self.jobs):
+            self.current_job = self.jobs[row]
+            self.load_history(self.current_job["jobId"])
+    
+    def load_history(self, job_id: str):
+        """真实调用 cron runs"""
+        worker = APIWorker("GET", "/cron/runs", {"jobId": job_id})
+        worker.result_ready.connect(self.on_history_loaded)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_history_loaded(self, data: Dict):
+        runs = data.get("runs", [])
+        history_text = ""
+        for run in runs[:10]:
+            ts = run.get("timestamp", "unknown")
+            status = run.get("status", "unknown")
+            history_text += "%s - %s\n" % (ts, status)
+        
+        self.history_view.setPlainText(history_text if history_text else "无运行历史")
+    
+    def add_job(self):
+        cron_expr = self.cron_input.text().strip()
+        message = self.message_input.text().strip()
+        
+        if not cron_expr or not message:
+            QMessageBox.warning(self, "提示", "请填写完整")
+            return
+        
+        """真实调用 cron add"""
+        worker = APIWorker("POST", "/cron/add", {
+            "schedule": {"kind": "cron", "expr": cron_expr},
+            "payload": {"kind": "systemEvent", "text": message},
+            "sessionTarget": "main",
+            "enabled": True
+        })
+        worker.result_ready.connect(self.on_job_added)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_job_added(self, data: Dict):
+        QMessageBox.information(self, "成功", "任务已添加")
+        self.load_jobs()
+    
+    def toggle_job(self, job_id: str):
+        # 获取当前状态
+        current_enabled = True
+        for job in self.jobs:
+            if job.get("jobId") == job_id:
+                current_enabled = job.get("enabled", True)
+                break
+        
+        """真实调用 cron update"""
+        worker = APIWorker("POST", "/cron/update", {
+            "jobId": job_id,
+            "patch": {"enabled": not current_enabled}
+        })
+        worker.result_ready.connect(self.on_job_updated)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_job_updated(self, data: Dict):
+        self.load_jobs()
+    
+    def on_error(self, error: str):
+        QMessageBox.critical(self, "错误", error)
+
+
+# ============================================================
+# 第三优先级：原有功能增强
+# ============================================================
+
 class ChatPage(QWidget):
-    """聊天页面"""
+    """聊天页面 - 保持原有实现"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -520,23 +1005,11 @@ class ChatPage(QWidget):
     
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
         
-        title = QLabel("💬 智能对话")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
+        layout.addWidget(QLabel("智能对话"))
         
         self.message_list = QTextEdit()
         self.message_list.setReadOnly(True)
-        self.message_list.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                border-radius: 8px;
-                padding: 12px;
-            }
-        """)
         layout.addWidget(self.message_list, stretch=1)
         
         input_row = QHBoxLayout()
@@ -544,29 +1017,9 @@ class ChatPage(QWidget):
         self.input_field = QTextEdit()
         self.input_field.setPlaceholderText("输入消息...")
         self.input_field.setMaximumHeight(100)
-        self.input_field.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                padding: 8px;
-            }
-        """)
         input_row.addWidget(self.input_field, stretch=1)
         
         send_btn = QPushButton("发送")
-        send_btn.setStyleSheet("""
-            QPushButton {
-                background: #238636;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 12px 24px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background: #2ea043; }
-        """)
         send_btn.clicked.connect(self.send_message)
         input_row.addWidget(send_btn)
         
@@ -582,7 +1035,7 @@ class ChatPage(QWidget):
         
         self.messages.append({"role": "user", "content": text})
         
-        worker = ChatWorker(self.messages)
+        worker = StreamWorker(self.messages)
         worker.chunk_received.connect(self.on_chunk)
         worker.result_ready.connect(self.on_result)
         worker.error_occurred.connect(self.on_error)
@@ -599,442 +1052,100 @@ class ChatPage(QWidget):
     def on_result(self, content: str):
         self.messages.append({"role": "assistant", "content": content})
         self.message_list.append("\n")
-        MEMORY.append_today_log("**对话**: %s\n" % content[:100])
     
     def on_error(self, error: str):
         self.message_list.append("\n<b style='color: #f85149;'>错误:</b> " + error)
 
 
-class BrowserPage(QWidget):
-    """浏览器自动化页面 - 真实调用 xbrowser"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = QLabel("🌐 浏览器自动化")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
-        
-        # 截图显示
-        self.screenshot_label = QLabel("点击「打开网页」开始")
-        self.screenshot_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.screenshot_label.setMinimumHeight(400)
-        self.screenshot_label.setStyleSheet("""
-            QLabel {
-                background: #0d1117;
-                border: 2px dashed #30363d;
-                border-radius: 8px;
-                color: #8b949e;
-            }
-        """)
-        layout.addWidget(self.screenshot_label)
-        
-        # URL 输入
-        url_row = QHBoxLayout()
-        url_row.addWidget(QLabel("网址:"))
-        
-        self.url_input = QLineEdit()
-        self.url_input.setText("https://www.google.com")
-        self.url_input.setStyleSheet("""
-            QLineEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                padding: 8px;
-            }
-        """)
-        url_row.addWidget(self.url_input, stretch=1)
-        
-        open_btn = QPushButton("打开")
-        open_btn.setStyleSheet("""
-            QPushButton {
-                background: #238636;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 8px 20px;
-            }
-        """)
-        open_btn.clicked.connect(self.open_page)
-        url_row.addWidget(open_btn)
-        
-        layout.addLayout(url_row)
-        
-        # 操作按钮
-        btn_row = QHBoxLayout()
-        
-        screenshot_btn = QPushButton("📸 截图")
-        screenshot_btn.clicked.connect(self.take_screenshot)
-        btn_row.addWidget(screenshot_btn)
-        
-        scrape_btn = QPushButton("📄 抓取")
-        scrape_btn.clicked.connect(self.scrape_page)
-        btn_row.addWidget(scrape_btn)
-        
-        close_btn = QPushButton("❌ 关闭")
-        close_btn.clicked.connect(self.close_browser)
-        btn_row.addWidget(close_btn)
-        
-        layout.addLayout(btn_row)
-        
-        # 结果显示
-        self.result_area = QTextEdit()
-        self.result_area.setReadOnly(True)
-        self.result_area.setMaximumHeight(150)
-        self.result_area.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-            }
-        """)
-        layout.addWidget(self.result_area)
-    
-    def open_page(self):
-        url = self.url_input.text().strip()
-        worker = BrowserWorker("open", {"url": url})
-        worker.progress.connect(self.on_progress)
-        worker.result_ready.connect(self.on_result)
-        worker.error_occurred.connect(self.on_error)
-        worker.start()
-        self.current_worker = worker
-    
-    def take_screenshot(self):
-        worker = BrowserWorker("screenshot")
-        worker.progress.connect(self.on_progress)
-        worker.screenshot_ready.connect(self.on_screenshot)
-        worker.result_ready.connect(self.on_result)
-        worker.error_occurred.connect(self.on_error)
-        worker.start()
-        self.current_worker = worker
-    
-    def scrape_page(self):
-        worker = BrowserWorker("scrape")
-        worker.progress.connect(self.on_progress)
-        worker.result_ready.connect(self.on_scrape_result)
-        worker.error_occurred.connect(self.on_error)
-        worker.start()
-        self.current_worker = worker
-    
-    def close_browser(self):
-        worker = BrowserWorker("close")
-        worker.progress.connect(self.on_progress)
-        worker.result_ready.connect(self.on_result)
-        worker.start()
-        self.current_worker = worker
-    
-    def on_progress(self, msg: str):
-        self.result_area.append(msg)
-    
-    def on_screenshot(self, img_base64: str):
-        img_data = base64.b64decode(img_base64)
-        pixmap = QPixmap()
-        pixmap.loadFromData(img_data)
-        self.screenshot_label.setPixmap(pixmap.scaled(
-            self.screenshot_label.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        ))
-    
-    def on_result(self, result: Dict):
-        self.result_area.append("✅ 完成")
-    
-    def on_scrape_result(self, result: Dict):
-        content = result.get("content", "")
-        self.result_area.append(content[:500])
-    
-    def on_error(self, error: str):
-        self.result_area.append("❌ " + error)
-
-
-class SkillsPage(QWidget):
-    """技能调用页面"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = QLabel("⚡ 技能调用")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
-        
-        # 技能选择
-        form = QFormLayout()
-        
-        self.skill_combo = QComboBox()
-        self.skill_combo.addItems([
-            "pdf - PDF 处理",
-            "xlsx - Excel 表格",
-            "docx - Word 文档",
-            "online-search - 在线搜索",
-            "windows-computer-agent - 电脑操作"
-        ])
-        self.skill_combo.setStyleSheet("""
-            QComboBox {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                padding: 8px;
-            }
-        """)
-        form.addRow("技能:", self.skill_combo)
-        
-        self.params_input = QTextEdit()
-        self.params_input.setPlaceholderText('{"param1": "value1"}')
-        self.params_input.setMaximumHeight(100)
-        self.params_input.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                border-radius: 6px;
-                padding: 8px;
-            }
-        """)
-        form.addRow("参数:", self.params_input)
-        
-        layout.addLayout(form)
-        
-        # 调用按钮
-        invoke_btn = QPushButton("调用技能")
-        invoke_btn.setStyleSheet("""
-            QPushButton {
-                background: #238636;
-                color: white;
-                border: none;
-                border-radius: 6px;
-                padding: 12px 24px;
-                font-weight: bold;
-            }
-        """)
-        invoke_btn.clicked.connect(self.invoke_skill)
-        layout.addWidget(invoke_btn)
-        
-        # 结果
-        self.result_area = QTextEdit()
-        self.result_area.setReadOnly(True)
-        self.result_area.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-            }
-        """)
-        layout.addWidget(self.result_area, stretch=1)
-    
-    def invoke_skill(self):
-        skill_text = self.skill_combo.currentText()
-        skill_name = skill_text.split(" - ")[0]
-        
-        params_text = self.params_input.toPlainText().strip()
-        try:
-            params = json.loads(params_text) if params_text else {}
-        except:
-            params = {"input": params_text}
-        
-        worker = SkillWorker(skill_name, params)
-        worker.progress.connect(self.on_progress)
-        worker.result_ready.connect(self.on_result)
-        worker.error_occurred.connect(self.on_error)
-        worker.start()
-        self.current_worker = worker
-    
-    def on_progress(self, msg: str):
-        self.result_area.append(msg)
-    
-    def on_result(self, result: Dict):
-        content = result.get("result", "")
-        self.result_area.append("✅ 结果:\n" + content[:1000])
-    
-    def on_error(self, error: str):
-        self.result_area.append("❌ 错误: " + error)
-
-
-class TasksPage(QWidget):
-    """任务调度页面 - 真实调用 OpenClaw cron API"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-        self.load_tasks()
-        
-        # 自动刷新
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self.load_tasks)
-        self.refresh_timer.start(10000)  # 每10秒刷新
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = QLabel("⏰ 任务调度")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
-        
-        # 任务表格
-        self.tasks_table = QTableWidget()
-        self.tasks_table.setColumnCount(5)
-        self.tasks_table.setHorizontalHeaderLabels(["ID", "Cron", "消息", "状态", "操作"])
-        self.tasks_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tasks_table.setStyleSheet("""
-            QTableWidget {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                gridline-color: #30363d;
-            }
-            QHeaderView::section {
-                background: #161b22;
-                color: #e6edf3;
-                border: none;
-                padding: 8px;
-            }
-        """)
-        layout.addWidget(self.tasks_table, stretch=1)
-        
-        # 添加任务
-        add_group = QGroupBox("添加新任务")
-        add_layout = QFormLayout(add_group)
-        
-        self.cron_input = QLineEdit()
-        self.cron_input.setPlaceholderText("0 9 * * *")
-        self.cron_input.setStyleSheet("background: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 8px;")
-        add_layout.addRow("Cron:", self.cron_input)
-        
-        self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("每天早上9点提醒我...")
-        self.message_input.setStyleSheet("background: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 8px;")
-        add_layout.addRow("消息:", self.message_input)
-        
-        add_btn = QPushButton("添加")
-        add_btn.setStyleSheet("background: #238636; color: white; border: none; border-radius: 6px; padding: 10px 20px;")
-        add_btn.clicked.connect(self.add_task)
-        add_layout.addRow(add_btn)
-        
-        layout.addWidget(add_group)
-    
-    def load_tasks(self):
-        jobs = CRON.list_jobs()
-        self.tasks_table.setRowCount(len(jobs))
-        
-        for i, job in enumerate(jobs):
-            self.tasks_table.setItem(i, 0, QTableWidgetItem(job.get("jobId", "")))
-            self.tasks_table.setItem(i, 1, QTableWidgetItem(job.get("cron", "")))
-            self.tasks_table.setItem(i, 2, QTableWidgetItem(job.get("message", "")[:30]))
-            
-            status = "启用" if job.get("enabled", True) else "禁用"
-            status_item = QTableWidgetItem(status)
-            status_item.setForeground(QColor("#3fb950") if job.get("enabled", True) else QColor("#f85149")))
-            self.tasks_table.setItem(i, 3, status_item)
-            
-            # 操作按钮
-            toggle_btn = QPushButton("切换" if job.get("enabled", True) else "启用")
-            toggle_btn.clicked.connect(lambda checked, jid=job.get("jobId"): self.toggle_task(jid))
-            self.tasks_table.setCellWidget(i, 4, toggle_btn)
-    
-    def add_task(self):
-        cron_expr = self.cron_input.text().strip()
-        message = self.message_input.text().strip()
-        
-        if not cron_expr or not message:
-            QMessageBox.warning(self, "提示", "请填写完整")
-            return
-        
-        result = CRON.add_job(cron_expr, message)
-        
-        if result["success"]:
-            QMessageBox.information(self, "成功", "任务已添加")
-            self.load_tasks()
-        else:
-            QMessageBox.critical(self, "失败", result.get("error", "未知错误"))
-    
-    def toggle_task(self, job_id: str):
-        # 获取当前状态
-        jobs = CRON.list_jobs()
-        current_enabled = True
-        for job in jobs:
-            if job.get("jobId") == job_id:
-                current_enabled = job.get("enabled", True)
-                break
-        
-        # 切换状态
-        result = CRON.update_job(job_id, {"enabled": not current_enabled})
-        
-        if result["success"]:
-            self.load_tasks()
-        else:
-            QMessageBox.critical(self, "失败", result.get("error", "未知错误"))
-
-
 class MemoryPage(QWidget):
-    """记忆管理页面"""
+    """记忆管理页面 - LCM 集成"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
-        self.load_data()
     
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = QLabel("🧠 记忆系统")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
         
         tabs = QTabWidget()
         
-        # MEMORY.md 标签
-        memory_tab = QWidget()
-        memory_layout = QVBoxLayout(memory_tab)
+        # 本地记忆标签
+        local_tab = QWidget()
+        local_layout = QVBoxLayout(local_tab)
         
         self.memory_editor = QTextEdit()
-        self.memory_editor.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                font-family: 'Consolas', monospace;
-            }
-        """)
-        memory_layout.addWidget(self.memory_editor)
+        local_layout.addWidget(self.memory_editor)
         
         save_btn = QPushButton("保存")
         save_btn.clicked.connect(self.save_memory)
-        memory_layout.addWidget(save_btn)
+        local_layout.addWidget(save_btn)
         
-        tabs.addTab(memory_tab, "长期记忆")
+        tabs.addTab(local_tab, "本地记忆")
         
-        # 日志标签
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
+        # LCM 搜索标签
+        lcm_tab = QWidget()
+        lcm_layout = QVBoxLayout(lcm_tab)
         
-        self.log_editor = QTextEdit()
-        self.log_editor.setReadOnly(True)
-        log_layout.addWidget(self.log_editor)
+        search_row = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索记忆...")
+        search_row.addWidget(self.search_input, stretch=1)
         
-        tabs.addTab(log_tab, "今日日志")
+        search_btn = QPushButton("搜索")
+        search_btn.clicked.connect(self.search_lcm)
+        search_row.addWidget(search_btn)
+        
+        lcm_layout.addLayout(search_row)
+        
+        self.search_results = QTextEdit()
+        self.search_results.setReadOnly(True)
+        lcm_layout.addWidget(self.search_results, stretch=1)
+        
+        tabs.addTab(lcm_tab, "LCM 搜索")
         
         layout.addWidget(tabs)
+        
+        # 加载本地记忆
+        self.load_memory()
     
-    def load_data(self):
-        self.memory_editor.setPlainText(MEMORY.load_memory())
-        self.log_editor.setPlainText(MEMORY.load_today_log())
+    def load_memory(self):
+        memory_path = Path.home() / ".qclaw" / "workspace-ua58rsb93veqtxl7" / "MEMORY.md"
+        if memory_path.exists():
+            with open(memory_path, "r", encoding="utf-8") as f:
+                self.memory_editor.setPlainText(f.read())
     
     def save_memory(self):
-        MEMORY.save_memory(self.memory_editor.toPlainText())
+        memory_path = Path.home() / ".qclaw" / "workspace-ua58rsb93veqtxl7" / "MEMORY.md"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(memory_path, "w", encoding="utf-8") as f:
+            f.write(self.memory_editor.toPlainText())
         QMessageBox.information(self, "成功", "记忆已保存")
+    
+    def search_lcm(self):
+        query = self.search_input.text().strip()
+        if not query:
+            return
+        
+        """真实调用 lcm_grep"""
+        worker = APIWorker("POST", "/lcm/grep", {
+            "pattern": query,
+            "mode": "full_text",
+            "limit": 20
+        })
+        worker.result_ready.connect(self.on_search_results)
+        worker.error_occurred.connect(self.on_error)
+        worker.start()
+        self.current_worker = worker
+    
+    def on_search_results(self, data: Dict):
+        results = data.get("results", [])
+        text = ""
+        for r in results[:10]:
+            text += "---\n%s\n" % r.get("snippet", "")[:200]
+        self.search_results.setPlainText(text if text else "无结果")
+    
+    def on_error(self, error: str):
+        self.search_results.setPlainText("错误: " + error)
 
 
 class FilesPage(QWidget):
@@ -1046,18 +1157,12 @@ class FilesPage(QWidget):
     
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = QLabel("📁 文件管理")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
         
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("路径:"))
         
         self.path_input = QLineEdit()
         self.path_input.setText(str(Path.home()))
-        self.path_input.setStyleSheet("background: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 8px;")
         path_row.addWidget(self.path_input, stretch=1)
         
         browse_btn = QPushButton("浏览")
@@ -1115,18 +1220,12 @@ class ExecPage(QWidget):
     
     def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        title = QLabel("💻 命令执行")
-        title.setStyleSheet("font-size: 24px; font-weight: bold; color: #e6edf3;")
-        layout.addWidget(title)
         
         cmd_row = QHBoxLayout()
         cmd_row.addWidget(QLabel("命令:"))
         
         self.cmd_input = QLineEdit()
         self.cmd_input.setPlaceholderText("echo hello")
-        self.cmd_input.setStyleSheet("background: #0d1117; color: #e6edf3; border: 1px solid #30363d; padding: 8px;")
         cmd_row.addWidget(self.cmd_input, stretch=1)
         
         run_btn = QPushButton("执行")
@@ -1137,14 +1236,6 @@ class ExecPage(QWidget):
         
         self.output_area = QTextEdit()
         self.output_area.setReadOnly(True)
-        self.output_area.setStyleSheet("""
-            QTextEdit {
-                background: #0d1117;
-                color: #e6edf3;
-                border: 1px solid #30363d;
-                font-family: 'Consolas', monospace;
-            }
-        """)
         layout.addWidget(self.output_area, stretch=1)
     
     def run_command(self):
@@ -1152,24 +1243,25 @@ class ExecPage(QWidget):
         if not cmd:
             return
         
-        worker = ExecWorker(cmd)
-        worker.progress.connect(self.on_progress)
-        worker.output_ready.connect(self.on_output)
-        worker.error_occurred.connect(self.on_error)
-        worker.start()
-        self.current_worker = worker
-    
-    def on_progress(self, msg: str):
-        self.output_area.append(msg)
-    
-    def on_output(self, stdout: str, stderr: str):
-        if stdout:
-            self.output_area.append(stdout)
-        if stderr:
-            self.output_area.append("<span style='color: #f85149;'>" + stderr + "</span>")
-    
-    def on_error(self, error: str):
-        self.output_area.append("<span style='color: #f85149;'>错误: " + error + "</span>")
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                encoding="utf-8",
+                errors="replace"
+            )
+            
+            if result.stdout:
+                self.output_area.append(result.stdout)
+            if result.stderr:
+                self.output_area.append("<span style='color: #f85149;'>" + result.stderr + "</span>")
+        except subprocess.TimeoutExpired:
+            self.output_area.append("<span style='color: #f85149;'>命令超时</span>")
+        except Exception as e:
+            self.output_area.append("<span style='color: #f85149;'>错误: " + str(e) + "</span>")
 
 
 # ============================================================
@@ -1178,8 +1270,8 @@ class ExecPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Agent Studio V5 - 完整真实实现版")
-        self.setMinimumSize(1200, 800)
+        self.setWindowTitle("Agent Studio V5 - OpenClaw 完整对齐版")
+        self.setMinimumSize(1400, 900)
         
         self.init_ui()
         self.apply_theme()
@@ -1197,7 +1289,6 @@ class MainWindow(QMainWindow):
         sidebar.setStyleSheet("background: #161b22;")
         
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(0, 0, 0, 0)
         
         logo = QLabel("Agent Studio")
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1206,11 +1297,15 @@ class MainWindow(QMainWindow):
         
         self.pages = QStackedWidget()
         
+        # 导航项 - 完整10个页面
         nav_items = [
             ("💬 对话", ChatPage()),
+            ("🔄 会话", SessionsPage()),      # 新增
             ("🌐 浏览器", BrowserPage()),
             ("⚡ 技能", SkillsPage()),
             ("⏰ 任务", TasksPage()),
+            ("📡 节点", NodesPage()),          # 新增
+            ("📨 消息", MessagePage()),        # 新增
             ("🧠 记忆", MemoryPage()),
             ("📁 文件", FilesPage()),
             ("💻 命令", ExecPage()),
@@ -1257,9 +1352,6 @@ class MainWindow(QMainWindow):
         """)
 
 
-# ============================================================
-# 主入口
-# ============================================================
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

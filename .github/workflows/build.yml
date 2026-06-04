@@ -23,6 +23,18 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller PyQt6 requests pywinauto Pillow
     
+    - name: Check VC++ Redistributable
+      run: |
+        # Check if VC++ 2015-2022 Redistributable is installed
+        $vcRedist = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64' -ErrorAction SilentlyContinue
+        if (-not $vcRedist) {
+          Write-Host "VC++ Redistributable not found. Downloading..."
+          Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile 'vc_redist.x64.exe'
+          Start-Process -FilePath 'vc_redist.x64.exe' -Args '/quiet /norestart' -Wait
+        } else {
+          Write-Host "VC++ Redistributable already installed"
+        }
+    
     - name: Build with PyInstaller (directory mode)
       env:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}

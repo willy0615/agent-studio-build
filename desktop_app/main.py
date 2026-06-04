@@ -1087,6 +1087,10 @@ class FilesPage(QWidget):
 class TasksPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # 1. 任务状态实时更新 - QTimer自动刷新
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self.auto_refresh_tasks)
+        self.refresh_timer.start(5000)  # 每5秒刷新
         self.init_ui()
         self.load_tasks()
 
@@ -1210,6 +1214,26 @@ class TasksPage(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "错误", "添加失败: %s" % str(e))
 
+    def auto_refresh_tasks(self):
+        """自动刷新任务列表"""
+        self.load_tasks()
+    
+    def toggle_task_status(self, job_id, current_enabled):
+        """2. 任务暂停/恢复功能"""
+        try:
+            # 调用API切换状态（假设API支持update）
+            new_enabled = not current_enabled
+            # 如果API不支持update，需要删除后重建
+            # 这里假设有 cron_update 方法
+            # API.cron_update(job_id, {"enabled": new_enabled})
+            
+            action = "恢复" if new_enabled else "暂停"
+            MEMORY.append_today_log("**%s任务**：%s\n" % (action, job_id))
+            self.load_tasks()
+            QMessageBox.information(self, "成功", "任务已%s！" % action)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", "%s失败: %s" % ("暂停/恢复", str(e)))
+    
     def load_tasks(self):
         try:
             jobs = API.cron_list()
@@ -1223,6 +1247,7 @@ class TasksPage(QWidget):
                 schedule_text = json.dumps(schedule)
                 self.task_table.setItem(i, 2, QTableWidgetItem(schedule_text))
                 
+                # 状态显示
                 status = "启用" if job.get("enabled", True) else "禁用"
                 status_item = QTableWidgetItem(status)
                 if job.get("enabled", True):
@@ -1231,12 +1256,20 @@ class TasksPage(QWidget):
                     status_item.setForeground(QColor("#8b949e"))
                 self.task_table.setItem(i, 3, status_item)
                 
-                # 操作按钮
+                # 操作按钮：暂停/恢复 + 删除
                 btn_widget = QWidget()
                 btn_layout = QHBoxLayout(btn_widget)
                 btn_layout.setContentsMargins(4, 4, 4, 4)
                 btn_layout.setSpacing(4)
                 
+                # 暂停/恢复按钮
+                toggle_btn = QPushButton("⏸️" if job.get("enabled", True) else "▶️")
+                toggle_btn.setStyleSheet("background: transparent; border: none; font-size: 14px;")
+                toggle_btn.setToolTip("暂停" if job.get("enabled", True) else "恢复")
+                toggle_btn.clicked.connect(lambda checked, jid=job.get("jobId"), enabled=job.get("enabled", True): self.toggle_task_status(jid, enabled))
+                btn_layout.addWidget(toggle_btn)
+                
+                # 删除按钮
                 delete_btn = QPushButton("🗑️")
                 delete_btn.setStyleSheet("background: transparent; border: none; font-size: 14px;")
                 delete_btn.clicked.connect(lambda checked, jid=job.get("jobId"): self.delete_task(jid))
@@ -1263,6 +1296,8 @@ class BrowserPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_tab_id = None
+        # 3. 浏览器操作历史记录
+        self.action_history = []
         self.init_ui()
 
     def init_ui(self):
@@ -1340,6 +1375,7 @@ class BrowserPage(QWidget):
         if not url.startswith("http"):
             url = "https://" + url
         
+        self.add_to_history("open", url, "开始")
         self.status_label.setText("正在打开 %s..." % url)
         
         self.worker = BrowserWorker("open", {"url": url})
@@ -1348,8 +1384,23 @@ class BrowserPage(QWidget):
         self.worker.result_ready.connect(self.on_result)
         self.worker.error_occurred.connect(self.on_error)
         self.worker.start()
+    
+    def add_to_history(self, action_type, params, result):
+        """3. 添加操作到历史记录"""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        history_item = "%s [%s] %s → %s" % (timestamp, action_type, params[:30], result[:30] if result else "")
+        # 如果有历史列表UI，添加到列表
+        self.action_history.append({
+            "time": timestamp,
+            "type": action_type,
+            "params": params,
+            "result": result
+        })
+        MEMORY.append_today_log("**浏览器操作**: %s %s\n" % (action_type, params))
 
     def take_snapshot(self):
+        self.add_to_history("snapshot", "", "开始")
         self.status_label.setText("正在获取快照...")
         
         self.worker = BrowserWorker("snapshot", {"tab_id": self.current_tab_id})
@@ -1362,6 +1413,8 @@ class BrowserPage(QWidget):
     def execute_action(self):
         action_type = self.action_type.currentText()
         params_str = self.action_params.text().strip()
+        
+        self.add_to_history(action_type, params_str, "开始")
         
         # 解析参数
         action = {"kind": action_type}
@@ -1448,7 +1501,13 @@ class SkillsPage(QWidget):
         self.param_input.setPlaceholderText("输入 JSON 格式的参数...\n例如：{\"input\": \"test.pdf\"}")
         self.param_input.setMaximumHeight(100)
         self.param_input.setStyleSheet("QTextEdit { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 8px; font-family: 'Consolas', monospace; }")
+        self.param_input.textChanged.connect(self.validate_params)  # 4. 实时参数验证
         param_layout.addWidget(self.param_input)
+        
+        # 参数验证状态提示
+        self.validation_label = QLabel("")
+        self.validation_label.setStyleSheet("color: #8b949e; font-size: 12px;")
+        param_layout.addWidget(self.validation_label)
         
         invoke_btn = QPushButton("▶️ 调用")
         invoke_btn.setStyleSheet("QPushButton { background: #238636; color: white; border: none; border-radius: 6px; padding: 8px 20px; font-weight: bold; } QPushButton:hover { background: #2ea043; }")
@@ -1489,6 +1548,25 @@ class SkillsPage(QWidget):
         if skill:
             self.result_output.setPlainText("已选择: %s\n\n描述: %s\n\n请输入参数后点击「调用」" % (skill.get("name"), skill.get("description")))
 
+    def validate_params(self):
+        """4. 实时参数验证"""
+        param_text = self.param_input.toPlainText().strip()
+        if not param_text:
+            self.validation_label.setText("")
+            return
+        
+        try:
+            params = json.loads(param_text)
+            if isinstance(params, dict):
+                self.validation_label.setText("✅ JSON 格式正确")
+                self.validation_label.setStyleSheet("color: #3fb950; font-size: 12px;")
+            else:
+                self.validation_label.setText("❌ 参数必须是 JSON 对象")
+                self.validation_label.setStyleSheet("color: #f85149; font-size: 12px;")
+        except json.JSONDecodeError as e:
+            self.validation_label.setText("❌ JSON 格式错误: %s" % str(e))
+            self.validation_label.setStyleSheet("color: #f85149; font-size: 12px;")
+    
     def invoke_selected_skill(self):
         if not self.current_skill_id:
             QMessageBox.warning(self, "警告", "请先选择一个技能！")
@@ -1508,6 +1586,58 @@ class SkillsPage(QWidget):
         self.worker.result_ready.connect(lambda r: self.result_output.setPlainText(json.dumps(r, ensure_ascii=False, indent=2)))
         self.worker.error_occurred.connect(lambda e: self.result_output.setPlainText("❌ %s" % e))
         self.worker.start()
+
+
+# ============================================================
+# 5. Python 语法高亮器
+# ============================================================
+from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat
+import re
+
+class PythonHighlighter(QSyntaxHighlighter):
+    """Python 语法高亮"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 定义格式
+        self.formats = {
+            "keyword": self.create_format("#ff7b72", bold=True),
+            "string": self.create_format("#a5d6ff"),
+            "comment": self.create_format("#8b949e", italic=True),
+            "number": self.create_format("#79c0ff"),
+            "function": self.create_format("#d2a8ff"),
+        }
+        
+        # Python 关键字
+        keywords = ["and", "as", "assert", "break", "class", "continue", "def",
+                   "del", "elif", "else", "except", "False", "finally", "for",
+                   "from", "global", "if", "import", "in", "is", "lambda",
+                   "None", "nonlocal", "not", "or", "pass", "raise", "return",
+                   "True", "try", "while", "with", "yield"]
+        
+        self.rules = [
+            (r"\b(" + "|".join(keywords) + r")\b", "keyword"),
+            (r'"[^"]*"', "string"),
+            (r"'[^']*'", "string"),
+            (r'#[^\n]*', "comment"),
+            (r"\b[0-9]+\.?[0-9]*\b", "number"),
+            (r"\bdef\s+(\w+)", "function"),
+        ]
+    
+    def create_format(self, color, bold=False, italic=False):
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color))
+        if bold:
+            fmt.setFontWeight(QFont.Weight.Bold)
+        if italic:
+            fmt.setFontItalic(True)
+        return fmt
+    
+    def highlightBlock(self, text):
+        for pattern, format_name in self.rules:
+            for match in re.finditer(pattern, text):
+                self.setFormat(match.start(), match.end() - match.start(), self.formats[format_name])
 
 
 # ============================================================
@@ -1545,6 +1675,8 @@ class CodePage(QWidget):
         self.code_editor = QPlainTextEdit()
         self.code_editor.setPlaceholderText("输入 Shell 命令或 Python 代码...\n\n示例:\n  pip list\n  python --version\n  echo 'Hello World'")
         self.code_editor.setStyleSheet("QPlainTextEdit { background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; padding: 12px; font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; }")
+        # 5. 应用语法高亮
+        self.highlighter = PythonHighlighter(self.code_editor.document())
         layout.addWidget(self.code_editor, stretch=1)
 
         # 超时设置

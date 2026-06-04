@@ -30,24 +30,13 @@ jobs:
         cd desktop_app
         pyinstaller --onefile --windowed --name AgentStudio main.py
     
+    - name: Show output size
+      run: |
+        Get-ChildItem desktop_app/dist/AgentStudio.exe | Select-Object Name, @{N="Size(MB)";E={[math]::Round($_.Length/1MB,2)}}, LastWriteTime
+    
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: AgentStudio-V5
         path: desktop_app/dist/AgentStudio.exe
-        retention-days: 7
-    
-    - name: Show output size
-      run: |
-        Get-ChildItem desktop_app/dist/AgentStudio.exe | Select-Object Name, Length, LastWriteTime
-        
-    - name: Create Release
-      if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: v${{ github.run_number }}
-        name: AgentStudio V5 Build ${{ github.run_number }}
-        files: desktop_app/dist/AgentStudio.exe
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        retention-days: 30

@@ -23,26 +23,27 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller PyQt6 requests pywinauto Pillow
     
-    - name: Build with PyInstaller
+    - name: Build with PyInstaller (directory mode)
       env:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       run: |
         cd desktop_app
-        pyinstaller --onefile --console --name AgentStudio_debug `
+        pyinstaller --onedir --windowed --name AgentStudio `
           --hidden-import PyQt6.QtCore `
           --hidden-import PyQt6.QtGui `
           --hidden-import PyQt6.QtWidgets `
           --hidden-import PyQt6.QtSvg `
           --collect-all PyQt6 `
+          --add-binary "%Python3_ROOT_DIR%\Lib\site-packages\PyQt6\Qt6\plugins\platforms\qwindows.dll;PyQt6/Qt6/plugins/platforms" `
           main.py
     
-    - name: Show output size
+    - name: Check build output
       run: |
-        Get-ChildItem desktop_app/dist/AgentStudio.exe | Select-Object Name, @{N="Size(MB)";E={[math]::Round($_.Length/1MB,2)}}, LastWriteTime
+        Get-ChildItem desktop_app/dist/AgentStudio -Recurse | Where-Object { $_.Name -like "*.exe" -or $_.Name -like "*.dll" } | Select-Object Name, Length | Sort-Object Length -Descending | Select-Object -First 20
     
-    - name: Upload artifact
+    - name: Upload artifact (folder)
       uses: actions/upload-artifact@v4
       with:
         name: AgentStudio-V5
-        path: desktop_app/dist/AgentStudio.exe
+        path: desktop_app/dist/AgentStudio
         retention-days: 30

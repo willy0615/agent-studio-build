@@ -40,14 +40,34 @@ jobs:
         NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       run: |
         cd desktop_app
+        # Find PyQt6 Qt6 plugins directory
+        python -c "import PyQt6, os; print(os.path.join(os.path.dirname(PyQt6.__file__), 'Qt6'))" > qt6_path.txt
+        $qt6Path = Get-Content qt6_path.txt -First 1
+        Write-Host "Qt6 path: $qt6Path"
+        
+        # Build with PyInstaller
         pyinstaller --onedir --windowed --name AgentStudio `
           --hidden-import PyQt6.QtCore `
           --hidden-import PyQt6.QtGui `
           --hidden-import PyQt6.QtWidgets `
           --hidden-import PyQt6.QtSvg `
           --collect-all PyQt6 `
-          --add-binary "%Python3_ROOT_DIR%\Lib\site-packages\PyQt6\Qt6\plugins\platforms\qwindows.dll;PyQt6/Qt6/plugins/platforms" `
           main.py
+        
+        # Manually copy Qt6 plugins
+        if (Test-Path $qt6Path) {
+          Write-Host "Copying Qt6 plugins..."
+          $destDir = 'dist/AgentStudio/PyQt6/Qt6'
+          if (-not (Test-Path $destDir)) { New-Item -ItemType Directory -Path $destDir -Force }
+          Copy-Item -Path "$qt6Path/*" -Destination $destDir -Recurse -Force
+          Write-Host "Qt6 plugins copied"
+        } else {
+          Write-Host "WARNING: Qt6 path not found"
+        }
+    
+    - name: Verify Qt6 plugins
+      run: |
+        Get-ChildItem desktop_app/dist/AgentStudio/PyQt6/Qt6/plugins/platforms -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.dll' } | Select-Object Name, Length
     
     - name: Check build output
       run: |

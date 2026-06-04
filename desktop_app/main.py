@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Agent Studio V5 - 真实 OpenClaw 工具集成版
-使用真实工具函数，无假设的 HTTP API
+Agent Studio V5 - 真实工具集成版
+所有功能通过 Gateway /v1/chat/completions 调用 Agent 执行工具
 """
 
 import sys
 import os
 import json
 import subprocess
+import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Any
@@ -18,662 +19,779 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QStackedWidget, QTableWidget, QTableWidgetItem,
     QFrame, QScrollArea, QHeaderView, QGroupBox, QFormLayout, QMessageBox,
     QTreeWidget, QTreeWidgetItem, QSplitter, QFileDialog, QSpinBox,
-    QDoubleSpinBox, QProgressBar, QTabWidget, QPlainTextEdit
+    QDoubleSpinBox, QProgressBar, QTabWidget, QPlainTextEdit, QTextBrowser,
+    QInputDialog
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
-from PyQt6.QtGui import QColor, QPixmap, QImage
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer, QMutex
+from PyQt6.QtGui import QColor, QPixmap, QImage, QFont, QIcon
 
 import requests
 
 
 # ============================================================
-# OpenClaw 真实工具调用（通过本地 Gateway HTTP API）
+# Gateway API
 # ============================================================
-class OpenClawAPI:
-    """OpenClaw Gateway API 封装"""
-    
+class GatewayAPI:
+    """通过 Gateway /v1/chat/completions 让 Agent 执行工具"""
+
     def __init__(self):
-        self.base_url = self._load_config()
-    
+        self.base_url = ""
+        self.token = ""
+        self.model = "qclaw/modelroute"
+        self._load_config()
+
     def _load_config(self):
         config_path = Path.home() / ".qclaw" / "openclaw.json"
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                return data.get("gateway", {}).get("url", "http://127.0.0.1:52402")
-        return "http://127.0.0.1:52402"
-    
-    def _call(self, tool_name: str, params: Dict = None) -> Dict:
-        """调用工具（这里简化为直接返回，实际通过 Agent 调用）"""
-        # 注意：桌面应用无法直接调用工具，需要通过 Agent
-        # 这里返回提示信息
-        return {"error": "需要通过 Agent 调用工具: " + tool_name}
-    
-    # ============================================================
-    # 会话管理 - 真实工具
-    # ============================================================
-    
-    def sessions_list(self, limit: int = 20) -> Dict:
-        """真实调用 sessions_list"""
-        return self._call("sessions_list", {"limit": limit})
-    
-    def sessions_history(self, session_key: str, limit: int = 100) -> Dict:
-        """真实调用 sessions_history"""
-        return self._call("sessions_history", {"sessionKey": session_key, "limit": limit})
-    
-    def sessions_send(self, session_key: str, message: str) -> Dict:
-        """真实调用 sessions_send"""
-        return self._call("sessions_send", {
-            "sessionKey": session_key,
-            "message": message,
-            "timeoutSeconds": 120
-        })
-    
-    def sessions_spawn(self, task: str) -> Dict:
-        """真实调用 sessions_spawn"""
-        return self._call("sessions_spawn", {
-            "task": task,
-            "runtime": "subagent",
-            "mode": "run"
-        })
-    
-    # ============================================================
-    # 节点管理 - 真实工具
-    # ============================================================
-    
-    def nodes_status(self) -> Dict:
-        """真实调用 nodes status"""
-        return self._call("nodes_status")
-    
-    def nodes_device_info(self, node_id: str) -> Dict:
-        """真实调用 nodes device_info"""
-        return self._call("nodes_device_info", {"node": node_id})
-    
-    def nodes_camera_snap(self, node_id: str, facing: str = "back") -> Dict:
-        """真实调用 nodes camera_snap"""
-        return self._call("nodes_camera_snap", {"node": node_id, "facing": facing})
-    
-    def nodes_location_get(self, node_id: str) -> Dict:
-        """真实调用 nodes location_get"""
-        return self._call("nodes_location_get", {"node": node_id})
-    
-    def nodes_screen_record(self, node_id: str, duration_ms: int = 10000) -> Dict:
-        """真实调用 nodes screen_record"""
-        return self._call("nodes_screen_record", {
-            "node": node_id,
-            "durationMs": duration_ms
-        })
-    
-    # ============================================================
-    # 消息推送 - 真实工具
-    # ============================================================
-    
-    def message_send(self, channel: str, to: str, message: str, buffer: str = None) -> Dict:
-        """真实调用 message send"""
-        params = {"channel": channel, "to": to, "message": message}
-        if buffer:
-            params["buffer"] = buffer
-        return self._call("message_send", params)
-    
-    # ============================================================
-    # 浏览器控制 - 真实工具
-    # ============================================================
-    
-    def browser_status(self) -> Dict:
-        """真实调用 browser status"""
-        return self._call("browser_status")
-    
-    def browser_profiles(self) -> Dict:
-        """真实调用 browser profiles"""
-        return self._call("browser_profiles")
-    
-    def browser_start(self, profile: str = "openclaw") -> Dict:
-        """真实调用 browser start"""
-        return self._call("browser_start", {"profile": profile})
-    
-    def browser_open(self, url: str) -> Dict:
-        """真实调用 browser open"""
-        return self._call("browser_open", {"url": url})
-    
-    def browser_screenshot(self) -> Dict:
-        """真实调用 browser screenshot"""
-        return self._call("browser_screenshot")
-    
-    def browser_stop(self) -> Dict:
-        """真实调用 browser stop"""
-        return self._call("browser_stop")
-    
-    # ============================================================
-    # 任务调度 - 真实工具
-    # ============================================================
-    
-    def cron_list(self, include_disabled: bool = True) -> Dict:
-        """真实调用 cron list"""
-        return self._call("cron_list", {"includeDisabled": include_disabled})
-    
-    def cron_runs(self, job_id: str) -> Dict:
-        """真实调用 cron runs"""
-        return self._call("cron_runs", {"jobId": job_id})
-    
-    def cron_add(self, cron_expr: str, message: str) -> Dict:
-        """真实调用 cron add"""
-        return self._call("cron_add", {
-            "schedule": {"kind": "cron", "expr": cron_expr},
-            "payload": {"kind": "systemEvent", "text": message},
-            "sessionTarget": "main",
-            "enabled": True
-        })
-    
-    def cron_update(self, job_id: str, enabled: bool) -> Dict:
-        """真实调用 cron update"""
-        return self._call("cron_update", {
-            "jobId": job_id,
-            "patch": {"enabled": enabled}
-        })
-    
-    # ============================================================
-    # 记忆系统 - 真实工具
-    # ============================================================
-    
-    def memory_search(self, query: str) -> Dict:
-        """真实调用 memory_search"""
-        return self._call("memory_search", {"query": query})
-    
-    def lcm_grep(self, pattern: str, mode: str = "full_text") -> Dict:
-        """真实调用 lcm_grep"""
-        return self._call("lcm_grep", {
-            "pattern": pattern,
-            "mode": mode,
-            "limit": 50
-        })
-    
-    def agents_list(self) -> Dict:
-        """真实调用 agents_list"""
-        return self._call("agents_list")
+                port = data.get("gateway", {}).get("port", 52402)
+                self.base_url = "http://127.0.0.1:%d" % port
+                self.token = data.get("gateway", {}).get("auth", {}).get("token", "")
 
+    def _headers(self):
+        return {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + self.token
+        }
 
-API = OpenClawAPI()
-
-
-# ============================================================
-# 会话管理页面 - 显示真实会话列表
-# ============================================================
-class SessionsPage(QWidget):
-    """会话管理 - 显示真实的 sessions_list 结果"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.sessions = []
-        self.init_ui()
-        
-        # 定时刷新
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.show_hint)
-        self.timer.start(10000)
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("会话管理（需要通过 Agent 调用 sessions_list）"))
-        
-        # 会话列表
-        self.session_list = QListWidget()
-        layout.addWidget(self.session_list, stretch=1)
-        
-        # 操作说明
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-如何使用：
-1. 在聊天页面，输入：帮我列出所有会话
-2. Agent 会调用 sessions_list 工具
-3. 结果会显示在聊天中
-
-其他命令：
-- 查看会话历史：sessions_history(sessionKey)
-- 发送消息：sessions_send(sessionKey, message)
-- 创建子会话：sessions_spawn(task)
-        """)
-        layout.addWidget(help_text)
-    
-    def show_hint(self):
-        self.session_list.clear()
-        self.session_list.addItem("请通过聊天页面调用工具")
-        self.session_list.addItem("例如：列出所有会话")
-
-
-# ============================================================
-# 节点管理页面 - 显示真实节点状态
-# ============================================================
-class NodesPage(QWidget):
-    """节点管理 - 显示真实的 nodes_status 结果"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("节点管理（需要通过 Agent 调用 nodes 工具）"))
-        
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-节点操作命令：
-- 查看节点状态：列出所有节点
-- 查看设备信息：nodes device_info
-- 远程拍照：nodes camera_snap
-- 获取位置：nodes location_get
-- 屏幕录制：nodes screen_record
-
-请在聊天页面输入命令，Agent 会调用相应工具。
-        """)
-        layout.addWidget(help_text, stretch=1)
-
-
-# ============================================================
-# 消息推送页面 - 真实 message 工具
-# ============================================================
-class MessagePage(QWidget):
-    """消息推送 - 使用真实 message 工具"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("消息推送（需要通过 Agent 调用 message 工具）"))
-        
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-消息推送命令：
-- 发送消息：给某人发送消息
-- 广播消息：给多人群发消息
-
-支持渠道：
-- telegram
-- discord
-- slack
-- wechat
-
-示例：
-"通过 telegram 给 user123 发送消息：你好"
-        """)
-        layout.addWidget(help_text, stretch=1)
-
-
-# ============================================================
-# 浏览器控制页面 - 真实 browser 工具
-# ============================================================
-class BrowserPage(QWidget):
-    """浏览器控制 - 使用真实 browser 工具"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("浏览器控制（需要通过 Agent 调用 browser 工具）"))
-        
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-浏览器命令：
-- 打开浏览器：打开 Chrome
-- 打开网页：打开 https://google.com
-- 截图：截屏
-- 点击：点击某个按钮
-- 输入：输入文字
-- 关闭：关闭浏览器
-
-示例：
-"打开浏览器，访问 https://github.com"
-        """)
-        layout.addWidget(help_text, stretch=1)
-
-
-# ============================================================
-# 任务调度页面 - 真实 cron 工具
-# ============================================================
-class TasksPage(QWidget):
-    """任务调度 - 使用真实 cron 工具"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("任务调度（需要通过 Agent 调用 cron 工具）"))
-        
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-任务调度命令：
-- 列出任务：显示所有定时任务
-- 添加任务：每天早上9点提醒我
-- 启用/禁用任务
-- 运行任务：立即执行任务
-- 查看历史：显示运行记录
-
-Cron 表达式：
-- 每天 9:00：0 9 * * *
-- 每小时：0 * * * *
-- 每周一 10:00：0 10 * * 1
-
-示例：
-"创建一个定时任务，每天早上9点提醒我开会"
-        """)
-        layout.addWidget(help_text, stretch=1)
-
-
-# ============================================================
-# 技能调用页面 - 真实 agents_list
-# ============================================================
-class SkillsPage(QWidget):
-    """技能调用 - 显示真实 agents_list 结果"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("技能调用（需要通过 Agent 调用技能）"))
-        
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-可用技能：
-- xbrowser: 浏览器自动化
-- online-search: 联网搜索
-- windows-computer-agent: Windows 电脑操作
-- docx: Word 文档操作
-- pdf: PDF 文件操作
-- xlsx: Excel 表格操作
-- figma: Figma 设计工具
-- email-skill: 邮件发送
-- mtunion-product-ai-guide: 美团团购助手
-
-调用示例：
-"用 xbrowser 打开网页"
-"用 docx 创建一个 Word 文档"
-"搜索一下今天的新闻"
-        """)
-        layout.addWidget(help_text, stretch=1)
-
-
-# ============================================================
-# 记忆管理页面 - 真实 memory_search 和 lcm_grep
-# ============================================================
-class MemoryPage(QWidget):
-    """记忆管理 - 使用真实 memory_search 和 lcm_grep"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("记忆管理（需要通过 Agent 调用记忆工具）"))
-        
-        help_text = QTextEdit()
-        help_text.setReadOnly(True)
-        help_text.setPlainText("""
-记忆操作命令：
-- 搜索记忆：搜索之前的内容
-- LCM 搜索：更详细的语义搜索
-
-示例：
-"搜索一下之前关于项目的讨论"
-"查找上周的会议记录"
-
-本地记忆文件：
-- ~/.qclaw/workspace-ua58rsb93veqtxl7/MEMORY.md
-- ~/.qclaw/workspace-ua58rsb93veqtxl7/memory/2026-06-04.md
-        """)
-        layout.addWidget(help_text, stretch=1)
-
-
-# ============================================================
-# 聊天页面 - 直接调用 OpenClaw API
-# ============================================================
-class ChatPage(QWidget):
-    """聊天对话 - 直接调用 OpenClaw /v1/chat/completions"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.messages = []
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
-        layout.addWidget(QLabel("智能对话"))
-        
-        # 消息显示区
-        self.message_list = QTextEdit()
-        self.message_list.setReadOnly(True)
-        layout.addWidget(self.message_list, stretch=1)
-        
-        # 输入区
-        input_row = QHBoxLayout()
-        
-        self.input_field = QTextEdit()
-        self.input_field.setPlaceholderText("输入消息...")
-        self.input_field.setMaximumHeight(100)
-        input_row.addWidget(self.input_field, stretch=1)
-        
-        send_btn = QPushButton("发送")
-        send_btn.clicked.connect(self.send_message)
-        input_row.addWidget(send_btn)
-        
-        layout.addLayout(input_row)
-    
-    def send_message(self):
-        text = self.input_field.toPlainText().strip()
-        if not text:
-            return
-        
-        self.message_list.append("<b>你:</b> " + text)
-        self.input_field.clear()
-        
-        # 添加到消息历史
-        self.messages.append({"role": "user", "content": text})
-        
-        # 调用 OpenClaw API
+    def chat_stream(self, messages, model=None, on_chunk=None):
+        """流式对话，每收到一段文字回调 on_chunk"""
+        url = self.base_url + "/v1/chat/completions"
+        payload = {
+            "model": model or self.model,
+            "messages": messages,
+            "stream": True,
+            "temperature": 0.3,
+            "max_tokens": 4096
+        }
+        full = ""
         try:
-            url = API.base_url + "/v1/chat/completions"
-            
-            # 读取配置中的 token
-            config_path = Path.home() / ".qclaw" / "openclaw.json"
-            token = ""
-            if config_path.exists():
-                with open(config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    token = data.get("gateway", {}).get("auth", {}).get("token", "")
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
-            }
-            
-            payload = {
-                "model": "qclaw/modelroute",
-                "messages": self.messages,
-                "stream": True,
-                "temperature": 0.7,
-                "max_tokens": 4096
-            }
-            
-            # 流式响应
-            full_content = ""
-            with requests.post(url, headers=headers, json=payload, stream=True, timeout=120) as resp:
+            with requests.post(url, headers=self._headers(), json=payload, stream=True, timeout=120) as resp:
                 if resp.status_code != 200:
-                    self.message_list.append("<span style='color: #f85149;'>错误: HTTP %d</span>" % resp.status_code)
-                    return
-                
-                self.message_list.append("<b>AI:</b> ")
-                cursor = self.message_list.textCursor()
-                cursor.movePosition(cursor.MoveOperation.End)
-                
+                    return "HTTP Error %d: %s" % (resp.status_code, resp.text[:200])
                 for line in resp.iter_lines():
                     if line:
                         line = line.decode("utf-8")
                         if line.startswith("data: "):
-                            data = line[6:]
-                            if data == "[DONE]":
+                            d = line[6:]
+                            if d == "[DONE]":
                                 break
                             try:
-                                chunk = json.loads(data)
-                                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    full_content += content
-                                    cursor.insertText(content)
-                                    self.message_list.setTextCursor(cursor)
-                                    QApplication.processEvents()
+                                chunk = json.loads(d)
+                                c = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                                if c:
+                                    full += c
+                                    if on_chunk:
+                                        on_chunk(c)
                             except:
                                 pass
-            
-            self.messages.append({"role": "assistant", "content": full_content})
-            self.message_list.append("\n")
-            
+            return full
         except requests.Timeout:
-            self.message_list.append("<span style='color: #f85149;'>错误: 请求超时</span>")
+            return "Error: request timeout"
         except Exception as e:
-            self.message_list.append("<span style='color: #f85149;'>错误: %s</span>" % str(e))
+            return "Error: %s" % str(e)
+
+    def call_tool_via_agent(self, instruction, model=None):
+        """通过 Agent 执行工具调用"""
+        messages = [
+            {"role": "system", "content": "You are a tool executor. Execute the requested tool call and return ONLY the raw result data. Do not add explanations."},
+            {"role": "user", "content": instruction}
+        ]
+        return self.chat_stream(messages, model=model)
+
+    def list_models(self):
+        """从配置获取可用模型"""
+        models = []
+        config_path = Path.home() / ".qclaw" / "openclaw.json"
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                providers = data.get("models", {}).get("providers", {})
+                for prov_name, prov in providers.items():
+                    for m in prov.get("models", []):
+                        models.append({
+                            "id": "%s/%s" % (prov_name, m["id"]),
+                            "name": m.get("name", m["id"]),
+                            "provider": prov_name
+                        })
+        return models
+
+
+API = GatewayAPI()
 
 
 # ============================================================
-# 文件管理页面
+# Worker Thread
+# ============================================================
+class ToolWorker(QThread):
+    """后台线程执行 Agent 工具调用"""
+    result_ready = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+
+    def __init__(self, instruction, model=None):
+        super().__init__()
+        self.instruction = instruction
+        self.model = model
+
+    def run(self):
+        try:
+            result = API.call_tool_via_agent(self.instruction, self.model)
+            self.result_ready.emit(result)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+def _safe_html(text):
+    """转义 HTML 特殊字符"""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ============================================================
+# 聊天页面
+# ============================================================
+class ChatPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.messages = []
+        self.worker = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("模型:"))
+        self.model_combo = QComboBox()
+        for m in API.list_models():
+            self.model_combo.addItem("%s (%s)" % (m["name"], m["provider"]), m["id"])
+        toolbar.addWidget(self.model_combo, stretch=1)
+        clear_btn = QPushButton("清空")
+        clear_btn.clicked.connect(self.clear_chat)
+        toolbar.addWidget(clear_btn)
+        layout.addLayout(toolbar)
+
+        self.msg_area = QTextEdit()
+        self.msg_area.setReadOnly(True)
+        self.msg_area.setFont(QFont("Consolas", 11))
+        layout.addWidget(self.msg_area, stretch=1)
+
+        input_row = QHBoxLayout()
+        self.input_field = QTextEdit()
+        self.input_field.setPlaceholderText("输入消息...")
+        self.input_field.setMaximumHeight(80)
+        input_row.addWidget(self.input_field, stretch=1)
+        send_btn = QPushButton("发送")
+        send_btn.setFixedWidth(80)
+        send_btn.clicked.connect(self.send_message)
+        input_row.addWidget(send_btn)
+        layout.addLayout(input_row)
+
+    def clear_chat(self):
+        self.messages.clear()
+        self.msg_area.clear()
+
+    def send_message(self):
+        text = self.input_field.toPlainText().strip()
+        if not text:
+            return
+        self.msg_area.append('<div style="color:#58a6ff;margin:4px 0"><b>你:</b> %s</div>' % _safe_html(text))
+        self.input_field.clear()
+        self.messages.append({"role": "user", "content": text})
+        model_id = self.model_combo.currentData()
+
+        self.msg_area.append('<div style="color:#8b949e;margin:4px 0"><b>AI:</b> </div>')
+        cursor = self.msg_area.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+
+        full = ""
+        def on_chunk(c):
+            nonlocal full
+            full += c
+            cursor.insertText(c)
+            self.msg_area.setTextCursor(cursor)
+            QApplication.processEvents()
+
+        def do_chat():
+            result = API.chat_stream(self.messages, model=model_id, on_chunk=on_chunk)
+            if result and result == full:
+                self.messages.append({"role": "assistant", "content": full})
+            self.msg_area.append("")
+
+        threading.Thread(target=do_chat, daemon=True).start()
+
+
+# ============================================================
+# 会话管理
+# ============================================================
+class SessionsPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(15000)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("会话管理"))
+
+        toolbar = QHBoxLayout()
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self.refresh)
+        toolbar.addWidget(refresh_btn)
+        self.detail_area = QTextEdit()
+        self.detail_area.setReadOnly(True)
+        self.detail_area.setFont(QFont("Consolas", 10))
+        toolbar.addWidget(self.detail_area, stretch=1)
+        send_btn = QPushButton("发消息到选中会话")
+        send_btn.clicked.connect(self.send_to_session)
+        toolbar.addWidget(send_btn)
+        layout.addLayout(toolbar)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Key", "状态", "模型", "Tokens", "活跃"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.cellDoubleClicked.connect(self.show_history)
+        layout.addWidget(self.table, stretch=1)
+
+        self.status = QLabel("就绪")
+        self.status.setStyleSheet("color:#8b949e;")
+        layout.addWidget(self.status)
+        self.refresh()
+
+    def refresh(self):
+        self.status.setText("获取中...")
+        self.status.setStyleSheet("color:#d29922;")
+        w = ToolWorker("Call sessions_list with limit=50. Return ONLY a JSON array of objects with: sessionKey, status, model, contextTokens, lastActive.")
+        w.result_ready.connect(self._loaded)
+        w.error_occurred.connect(lambda e: self.status.setText("错误: " + str(e)[:80]))
+        w.start()
+
+    def _loaded(self, result):
+        self.status.setText("已加载 " + datetime.now().strftime("%H:%M:%S"))
+        self.status.setStyleSheet("color:#8b949e;")
+        try:
+            text = result.strip()
+            if text.startswith("```"): text = text.split("\n", 1)[1]
+            if text.endswith("```"): text = text[:-3]
+            sessions = json.loads(text.strip())
+            if not isinstance(sessions, list): sessions = [sessions]
+            self.table.setRowCount(len(sessions))
+            for i, s in enumerate(sessions):
+                if isinstance(s, dict):
+                    self.table.setItem(i, 0, QTableWidgetItem(str(s.get("sessionKey", ""))))
+                    self.table.setItem(i, 1, QTableWidgetItem(str(s.get("status", ""))))
+                    self.table.setItem(i, 2, QTableWidgetItem(str(s.get("model", ""))))
+                    self.table.setItem(i, 3, QTableWidgetItem(str(s.get("contextTokens", ""))))
+                    self.table.setItem(i, 4, QTableWidgetItem(str(s.get("lastActive", ""))))
+        except Exception:
+            self.table.setRowCount(1)
+            self.table.setItem(0, 0, QTableWidgetItem("解析失败"))
+            self.detail_area.setPlainText(result[:2000])
+
+    def show_history(self, row, col):
+        item = self.table.item(row, 0)
+        if not item: return
+        key = item.text()
+        self.status.setText("获取历史...")
+        w = ToolWorker("Call sessions_history with sessionKey='%s', limit=20. Return ONLY JSON array." % key)
+        w.result_ready.connect(lambda r: self.detail_area.setPlainText(r[:3000]))
+        w.error_occurred.connect(lambda e: self.status.setText("错误"))
+        w.start()
+
+    def send_to_session(self):
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "提示", "请选择会话")
+            return
+        key = self.table.item(row, 0).text() if self.table.item(row, 0) else ""
+        msg, ok = QInputDialog.getText(self, "发送消息", "消息:")
+        if ok and msg:
+            w = ToolWorker("Call sessions_send with sessionKey='%s', message='%s'. Return result." % (key, msg))
+            w.result_ready.connect(lambda r: self.detail_area.setPlainText("结果: " + r[:2000]))
+            w.start()
+
+
+# ============================================================
+# 浏览器控制
+# ============================================================
+class BrowserPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.history = []
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("浏览器控制"))
+
+        ctrl = QHBoxLayout()
+        for label, cmd in [
+            ("状态", "Call browser with action='status'. Return raw JSON."),
+            ("启动", "Call browser with action='start'. Return raw JSON."),
+            ("截图", "Call browser with action='screenshot'. Return raw JSON."),
+            ("停止", "Call browser with action='stop'. Return raw JSON."),
+        ]:
+            b = QPushButton(label)
+            b.clicked.connect(lambda _, c=cmd: self._exec(c))
+            ctrl.addWidget(b)
+        open_btn = QPushButton("打开网页")
+        open_btn.clicked.connect(self._open_url)
+        ctrl.addWidget(open_btn)
+        layout.addLayout(ctrl)
+
+        url_row = QHBoxLayout()
+        url_row.addWidget(QLabel("URL:"))
+        self.url_input = QLineEdit("https://google.com")
+        url_row.addWidget(self.url_input, stretch=1)
+        layout.addLayout(url_row)
+
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        self.result_area = QTextEdit()
+        self.result_area.setReadOnly(True)
+        self.result_area.setFont(QFont("Consolas", 10))
+        splitter.addWidget(self.result_area)
+
+        self.history_list = QListWidget()
+        self.history_list.setFont(QFont("Consolas", 9))
+        self.history_list.setMaximumHeight(100)
+        splitter.addWidget(self.history_list)
+        layout.addWidget(splitter, stretch=1)
+
+    def _open_url(self):
+        url = self.url_input.text().strip()
+        if url:
+            self._exec("Call browser with action='open', url='%s'. Return raw JSON." % url)
+
+    def _exec(self, instruction):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.result_area.append('<span style="color:#8b949e">[%s] 执行中...</span>' % ts)
+        self.history.append("[%s] %s" % (ts, instruction[:60]))
+        self.history_list.clear()
+        for h in self.history[-10:]:
+            self.history_list.addItem(h)
+        w = ToolWorker(instruction)
+        w.result_ready.connect(lambda r: self.result_area.append('<span style="color:#3fb950">%s</span>' % _safe_html(r)))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+
+# ============================================================
+# 节点管理
+# ============================================================
+class NodesPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("节点管理"))
+
+        ctrl = QHBoxLayout()
+        for label, cmd in [
+            ("节点状态", "Call nodes with action='status'. Return raw JSON."),
+            ("设备信息", "Call nodes with action='device_info'. Return raw JSON."),
+            ("远程拍照", "Call nodes with action='camera_snap', facing='back'. Return raw JSON."),
+            ("获取位置", "Call nodes with action='location_get'. Return raw JSON."),
+        ]:
+            b = QPushButton(label)
+            b.clicked.connect(lambda _, c=cmd: self._exec(c))
+            ctrl.addWidget(b)
+        layout.addLayout(ctrl)
+
+        self.node_input = QLineEdit()
+        self.node_input.setPlaceholderText("节点 ID（可选）")
+        layout.addWidget(self.node_input)
+
+        self.result_area = QTextEdit()
+        self.result_area.setReadOnly(True)
+        self.result_area.setFont(QFont("Consolas", 10))
+        layout.addWidget(self.result_area, stretch=1)
+
+    def _exec(self, instruction):
+        nid = self.node_input.text().strip()
+        if nid:
+            instruction = instruction.replace("'. Return", "', node='%s'. Return" % nid)
+        self.result_area.clear()
+        self.result_area.append('<span style="color:#8b949e">执行中...</span>')
+        w = ToolWorker(instruction)
+        w.result_ready.connect(lambda r: self.result_area.setPlainText(r))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">Error: %s</span>' % str(e)))
+        w.start()
+
+
+# ============================================================
+# 消息推送
+# ============================================================
+class MessagePage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("消息推送"))
+
+        form = QFormLayout()
+        self.channel_combo = QComboBox()
+        self.channel_combo.addItems(["telegram", "discord", "slack", "wechat", "signal", "whatsapp"])
+        form.addRow("渠道:", self.channel_combo)
+        self.target_input = QLineEdit()
+        self.target_input.setPlaceholderText("目标用户ID")
+        form.addRow("目标:", self.target_input)
+        self.msg_input = QTextEdit()
+        self.msg_input.setMaximumHeight(80)
+        self.msg_input.setPlaceholderText("消息内容")
+        form.addRow("消息:", self.msg_input)
+        layout.addLayout(form)
+
+        send_btn = QPushButton("发送")
+        send_btn.clicked.connect(self.send)
+        layout.addWidget(send_btn)
+
+        self.result_area = QTextEdit()
+        self.result_area.setReadOnly(True)
+        self.result_area.setFont(QFont("Consolas", 10))
+        layout.addWidget(self.result_area, stretch=1)
+
+    def send(self):
+        ch = self.channel_combo.currentText()
+        target = self.target_input.text().strip()
+        msg = self.msg_input.toPlainText().strip()
+        if not target or not msg:
+            QMessageBox.warning(self, "提示", "填写目标和消息")
+            return
+        self.result_area.append('<span style="color:#8b949e">发送中...</span>')
+        w = ToolWorker("Call message with action='send', channel='%s', target='%s', message='%s'. Return raw JSON." % (ch, target, msg))
+        w.result_ready.connect(lambda r: self.result_area.append('<span style="color:#3fb950">%s</span>' % _safe_html(r)))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+
+# ============================================================
+# 任务调度
+# ============================================================
+class TasksPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start(30000)
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("任务调度"))
+
+        toolbar = QHBoxLayout()
+        refresh_btn = QPushButton("刷新")
+        refresh_btn.clicked.connect(self.refresh)
+        toolbar.addWidget(refresh_btn)
+        add_btn = QPushButton("添加")
+        add_btn.clicked.connect(self.add_task)
+        toolbar.addWidget(add_btn)
+        layout.addLayout(toolbar)
+
+        form = QFrame()
+        fl = QFormLayout(form)
+        self.cron_input = QLineEdit("0 9 * * *")
+        self.cron_input.setPlaceholderText("Cron 表达式")
+        fl.addRow("Cron:", self.cron_input)
+        self.task_input = QLineEdit()
+        self.task_input.setPlaceholderText("任务消息")
+        fl.addRow("消息:", self.task_input)
+        layout.addWidget(form)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Job ID", "名称", "Cron", "状态", "创建时间", "操作"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        layout.addWidget(self.table, stretch=1)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setMaximumHeight(80)
+        self.log.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.log)
+        self.refresh()
+
+    def refresh(self):
+        self.log.append('<span style="color:#8b949e">[%s] 刷新...</span>' % datetime.now().strftime("%H:%M:%S"))
+        w = ToolWorker("Call cron with action='list', includeDisabled=True. Return ONLY a JSON array of jobs with: jobId, name, enabled, schedule(expr), createdAt.")
+        w.result_ready.connect(self._loaded)
+        w.error_occurred.connect(lambda e: self.log.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+    def _loaded(self, result):
+        try:
+            text = result.strip()
+            if text.startswith("```"): text = text.split("\n", 1)[1]
+            if text.endswith("```"): text = text[:-3]
+            jobs = json.loads(text.strip())
+            if not isinstance(jobs, list): jobs = [jobs]
+            self.table.setRowCount(len(jobs))
+            for i, j in enumerate(jobs):
+                if isinstance(j, dict):
+                    jid = str(j.get("jobId", ""))
+                    name = str(j.get("name", ""))
+                    sched = j.get("schedule", {})
+                    expr = sched.get("expr", "") if isinstance(sched, dict) else str(sched)
+                    en = str(j.get("enabled", ""))
+                    self.table.setItem(i, 0, QTableWidgetItem(jid))
+                    self.table.setItem(i, 1, QTableWidgetItem(name))
+                    self.table.setItem(i, 2, QTableWidgetItem(expr))
+                    self.table.setItem(i, 3, QTableWidgetItem(en))
+                    self.table.setItem(i, 4, QTableWidgetItem(str(j.get("createdAt", ""))))
+                    btn = QPushButton("启用" if en == "False" else "禁用")
+                    btn.clicked.connect(lambda _, jid=jid, en=en: self.toggle(jid, en))
+                    self.table.setCellWidget(i, 5, btn)
+            self.log.append('<span style="color:#3fb950">已加载 %d 个任务</span>' % len(jobs))
+        except Exception:
+            self.log.append('<span style="color:#d29922">解析失败</span>')
+
+    def add_task(self):
+        ce = self.cron_input.text().strip()
+        msg = self.task_input.text().strip()
+        if not ce or not msg:
+            QMessageBox.warning(self, "提示", "填写 Cron 和消息")
+            return
+        w = ToolWorker("Call cron with action='add', schedule kind='cron' expr='%s', payload kind='systemEvent' text='%s', sessionTarget='main', enabled=True. Return raw JSON." % (ce, msg))
+        w.result_ready.connect(lambda r: (self.log.append('<span style="color:#3fb950">%s</span>' % _safe_html(r[:200])), self.refresh()))
+        w.error_occurred.connect(lambda e: self.log.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+    def toggle(self, jid, cur):
+        new = cur != "True"
+        w = ToolWorker("Call cron with action='update', jobId='%s', patch enabled=%s. Return JSON." % (jid, str(new).lower()))
+        w.result_ready.connect(lambda r: (self.log.append('<span style="color:#3fb950">%s</span>' % _safe_html(r[:200])), self.refresh()))
+        w.start()
+
+
+# ============================================================
+# 技能管理
+# ============================================================
+class SkillsPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("技能管理"))
+
+        ctrl = QHBoxLayout()
+        list_btn = QPushButton("列出 Agent")
+        list_btn.clicked.connect(self.list_agents)
+        ctrl.addWidget(list_btn)
+        install_btn = QPushButton("安装技能")
+        install_btn.clicked.connect(self.install_skill)
+        ctrl.addWidget(install_btn)
+        layout.addLayout(ctrl)
+
+        self.skill_input = QLineEdit()
+        self.skill_input.setPlaceholderText("技能名称")
+        layout.addWidget(self.skill_input)
+
+        self.result_area = QTextEdit()
+        self.result_area.setReadOnly(True)
+        self.result_area.setFont(QFont("Consolas", 10))
+        layout.addWidget(self.result_area, stretch=1)
+
+    def list_agents(self):
+        self.result_area.append('<span style="color:#8b949e">获取中...</span>')
+        w = ToolWorker("Call agents_list. Return raw JSON.")
+        w.result_ready.connect(lambda r: self.result_area.append(_safe_html(r)))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+    def install_skill(self):
+        name = self.skill_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "输入技能名称")
+            return
+        self.result_area.append('<span style="color:#8b949e">安装 %s...</span>' % name)
+        w = ToolWorker("Call skillhub_install with action='install_skill', skillName='%s'. Return raw result." % name)
+        w.result_ready.connect(lambda r: self.result_area.append(_safe_html(r)))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+
+# ============================================================
+# 记忆管理
+# ============================================================
+class MemoryPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("记忆管理"))
+
+        row = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("搜索关键词...")
+        row.addWidget(self.search_input, stretch=1)
+        mem_btn = QPushButton("记忆搜索")
+        mem_btn.clicked.connect(self.mem_search)
+        row.addWidget(mem_btn)
+        lcm_btn = QPushButton("LCM 搜索")
+        lcm_btn.clicked.connect(self.lcm_search)
+        row.addWidget(lcm_btn)
+        layout.addLayout(row)
+
+        local_row = QHBoxLayout()
+        local_row.addWidget(QLabel("本地:"))
+        mem_file = QPushButton("MEMORY.md")
+        mem_file.clicked.connect(lambda: self._show(Path.home() / ".qclaw" / "workspace-ua58rsb93veqtxl7" / "MEMORY.md"))
+        local_row.addWidget(mem_file)
+        today = datetime.now().strftime("%Y-%m-%d")
+        td_btn = QPushButton(today + ".md")
+        td_btn.clicked.connect(lambda: self._show(Path.home() / ".qclaw" / "workspace-ua58rsb93veqtxl7" / "memory" / (today + ".md")))
+        local_row.addWidget(td_btn)
+        local_row.addStretch()
+        layout.addLayout(local_row)
+
+        self.result_area = QTextEdit()
+        self.result_area.setReadOnly(True)
+        self.result_area.setFont(QFont("Consolas", 10))
+        layout.addWidget(self.result_area, stretch=1)
+
+    def _show(self, path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                self.result_area.setPlainText(f.read()[:5000])
+        except Exception as e:
+            self.result_area.setPlainText("Error: " + str(e))
+
+    def mem_search(self):
+        q = self.search_input.text().strip()
+        if not q: return
+        self.result_area.append('<span style="color:#8b949e">搜索: %s...</span>' % q)
+        w = ToolWorker("Call memory_search with query='%s'. Return raw JSON." % q)
+        w.result_ready.connect(lambda r: self.result_area.append(_safe_html(r)))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+    def lcm_search(self):
+        q = self.search_input.text().strip()
+        if not q: return
+        self.result_area.append('<span style="color:#8b949e">LCM: %s...</span>' % q)
+        w = ToolWorker("Call lcm_grep with pattern='%s', mode='full_text', limit=20. Return raw JSON." % q)
+        w.result_ready.connect(lambda r: self.result_area.append(_safe_html(r)))
+        w.error_occurred.connect(lambda e: self.result_area.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e))))
+        w.start()
+
+
+# ============================================================
+# 文件管理
 # ============================================================
 class FilesPage(QWidget):
-    """文件管理"""
-    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
-    
+
     def init_ui(self):
         layout = QVBoxLayout(self)
-        
-        path_row = QHBoxLayout()
-        path_row.addWidget(QLabel("路径:"))
-        
-        self.path_input = QLineEdit()
-        self.path_input.setText(str(Path.home()))
-        path_row.addWidget(self.path_input, stretch=1)
-        
-        browse_btn = QPushButton("浏览")
-        browse_btn.clicked.connect(self.browse_folder)
-        path_row.addWidget(browse_btn)
-        
-        layout.addLayout(path_row)
-        
-        self.file_tree = QTreeWidget()
-        self.file_tree.setHeaderLabels(["名称", "大小", "修改时间"])
-        layout.addWidget(self.file_tree, stretch=1)
-        
-        refresh_btn = QPushButton("刷新")
-        refresh_btn.clicked.connect(self.load_files)
-        layout.addWidget(refresh_btn)
-        
-        self.load_files()
-    
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "选择文件夹")
-        if folder:
-            self.path_input.setText(folder)
-            self.load_files()
-    
-    def load_files(self):
-        self.file_tree.clear()
-        path = Path(self.path_input.text())
-        
-        if not path.exists():
-            return
-        
-        try:
-            for item in sorted(path.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
-                size = self.format_size(item.stat().st_size) if item.is_file() else "<DIR>"
-                mtime = datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-                tree_item = QTreeWidgetItem([item.name, size, mtime])
-                self.file_tree.addTopLevelItem(tree_item)
-        except Exception as e:
-            QMessageBox.critical(self, "错误", str(e))
-    
-    def format_size(self, size: int) -> str:
-        for unit in ["B", "KB", "MB", "GB"]:
-            if size < 1024:
-                return "%d %s" % (size, unit)
-            size //= 1024
-        return "%d TB" % size
+        row = QHBoxLayout()
+        row.addWidget(QLabel("路径:"))
+        self.path_input = QLineEdit(str(Path.home()))
+        row.addWidget(self.path_input, stretch=1)
+        b = QPushButton("浏览")
+        b.clicked.connect(self.browse)
+        row.addWidget(b)
+        layout.addLayout(row)
+
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["名称", "大小", "修改时间"])
+        self.tree.doubleClicked.connect(self.preview_file)
+        layout.addWidget(self.tree, stretch=1)
+
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setMaximumHeight(200)
+        self.preview.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.preview)
+
+        b2 = QPushButton("刷新")
+        b2.clicked.connect(self.load)
+        layout.addWidget(b2)
+        self.load()
+
+    def browse(self):
+        d = QFileDialog.getExistingDirectory(self, "选择文件夹")
+        if d:
+            self.path_input.setText(d)
+            self.load()
+
+    def load(self):
+        self.tree.clear()
+        p = Path(self.path_input.text())
+        if not p.exists(): return
+        for item in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name)):
+            sz = self._fmt(item.stat().st_size) if item.is_file() else "<DIR>"
+            mt = datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+            self.tree.addTopLevelItem(QTreeWidgetItem([item.name, sz, mt]))
+
+    def preview_file(self, idx):
+        if idx.column() != 0: return
+        p = Path(self.path_input.text()) / idx.data()
+        if p.is_file():
+            try:
+                self.preview.setPlainText(open(p, "r", encoding="utf-8", errors="replace").read()[:3000])
+            except:
+                self.preview.setPlainText("(二进制文件)")
+
+    def _fmt(self, sz):
+        for u in ["B", "KB", "MB", "GB"]:
+            if sz < 1024: return "%d %s" % (sz, u)
+            sz //= 1024
+        return "%d TB" % sz
 
 
 # ============================================================
-# 命令执行页面
+# 命令执行
 # ============================================================
 class ExecPage(QWidget):
-    """命令执行"""
-    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.init_ui()
-    
+
     def init_ui(self):
         layout = QVBoxLayout(self)
-        
-        cmd_row = QHBoxLayout()
-        cmd_row.addWidget(QLabel("命令:"))
-        
-        self.cmd_input = QLineEdit()
-        self.cmd_input.setPlaceholderText("echo hello")
-        cmd_row.addWidget(self.cmd_input, stretch=1)
-        
-        run_btn = QPushButton("执行")
-        run_btn.clicked.connect(self.run_command)
-        cmd_row.addWidget(run_btn)
-        
-        layout.addLayout(cmd_row)
-        
-        self.output_area = QTextEdit()
-        self.output_area.setReadOnly(True)
-        layout.addWidget(self.output_area, stretch=1)
-    
-    def run_command(self):
-        cmd = self.cmd_input.text().strip()
-        if not cmd:
-            return
-        
+        row = QHBoxLayout()
+        row.addWidget(QLabel("命令:"))
+        self.cmd = QLineEdit()
+        self.cmd.setPlaceholderText("echo hello")
+        row.addWidget(self.cmd, stretch=1)
+        b = QPushButton("执行")
+        b.clicked.connect(self.run)
+        row.addWidget(b)
+        layout.addLayout(row)
+
+        self.output = QTextEdit()
+        self.output.setReadOnly(True)
+        self.output.setFont(QFont("Consolas", 10))
+        layout.addWidget(self.output, stretch=1)
+
+    def run(self):
+        c = self.cmd.text().strip()
+        if not c: return
+        self.output.append('<span style="color:#8b949e">[%s] $ %s</span>' % (datetime.now().strftime("%H:%M:%S"), _safe_html(c)))
         try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                encoding="utf-8",
-                errors="replace"
-            )
-            
-            if result.stdout:
-                self.output_area.append(result.stdout)
-            if result.stderr:
-                self.output_area.append("<span style='color: #f85149;'>" + result.stderr + "</span>")
+            r = subprocess.run(c, shell=True, capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
+            if r.stdout: self.output.append(_safe_html(r.stdout))
+            if r.stderr: self.output.append('<span style="color:#f85149">%s</span>' % _safe_html(r.stderr))
         except subprocess.TimeoutExpired:
-            self.output_area.append("<span style='color: #f85149;'>命令超时</span>")
+            self.output.append('<span style="color:#f85149">超时</span>')
         except Exception as e:
-            self.output_area.append("<span style='color: #f85149;'>错误: " + str(e) + "</span>")
+            self.output.append('<span style="color:#f85149">%s</span>' % _safe_html(str(e)))
 
 
 # ============================================================
@@ -682,97 +800,89 @@ class ExecPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Agent Studio V5 - 真实工具版")
+        self.setWindowTitle("Agent Studio V5")
         self.setMinimumSize(1400, 900)
-        
         self.init_ui()
         self.apply_theme()
-    
+
     def init_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 侧边栏
+        ml = QHBoxLayout(central)
+        ml.setContentsMargins(0, 0, 0, 0)
+
         sidebar = QFrame()
         sidebar.setFixedWidth(200)
         sidebar.setStyleSheet("background: #161b22;")
-        
-        sidebar_layout = QVBoxLayout(sidebar)
-        
+        sl = QVBoxLayout(sidebar)
+
         logo = QLabel("Agent Studio")
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo.setStyleSheet("color: #e6edf3; font-size: 18px; font-weight: bold; padding: 20px;")
-        sidebar_layout.addWidget(logo)
-        
+        sl.addWidget(logo)
+
         self.pages = QStackedWidget()
-        
-        # 导航项
-        nav_items = [
-            ("💬 对话", ChatPage()),
-            ("🔄 会话", SessionsPage()),
-            ("🌐 浏览器", BrowserPage()),
-            ("⚡ 技能", SkillsPage()),
-            ("⏰ 任务", TasksPage()),
-            ("📡 节点", NodesPage()),
-            ("📨 消息", MessagePage()),
-            ("🧠 记忆", MemoryPage()),
-            ("📁 文件", FilesPage()),
-            ("💻 命令", ExecPage()),
+        nav = [
+            ("对话", ChatPage()),
+            ("会话", SessionsPage()),
+            ("浏览器", BrowserPage()),
+            ("技能", SkillsPage()),
+            ("任务", TasksPage()),
+            ("节点", NodesPage()),
+            ("消息", MessagePage()),
+            ("记忆", MemoryPage()),
+            ("文件", FilesPage()),
+            ("命令", ExecPage()),
         ]
-        
-        self.nav_buttons = []
-        
-        for i, (name, page) in enumerate(nav_items):
+
+        self.nav_btns = []
+        for i, (name, page) in enumerate(nav):
             btn = QPushButton(name)
             btn.setStyleSheet("""
-                QPushButton {
-                    background: transparent;
-                    color: #c9d1d9;
-                    border: none;
-                    text-align: left;
-                    padding: 12px 20px;
-                }
+                QPushButton { background: transparent; color: #c9d1d9; border: none; text-align: left; padding: 12px 20px; }
                 QPushButton:hover { background: #21262d; }
                 QPushButton:checked { background: #21262d; color: #e6edf3; }
             """)
             btn.setCheckable(True)
             btn.setChecked(i == 0)
-            btn.clicked.connect(lambda checked, idx=i: self.switch_page(idx))
-            
-            sidebar_layout.addWidget(btn)
-            self.nav_buttons.append(btn)
+            btn.clicked.connect(lambda _, idx=i: self._switch(idx))
+            sl.addWidget(btn)
+            self.nav_btns.append(btn)
             self.pages.addWidget(page)
-        
-        sidebar_layout.addStretch()
-        
-        main_layout.addWidget(sidebar)
-        main_layout.addWidget(self.pages, stretch=1)
-    
-    def switch_page(self, index: int):
-        for i, btn in enumerate(self.nav_buttons):
-            btn.setChecked(i == index)
-        self.pages.setCurrentIndex(index)
-    
+
+        sl.addStretch()
+        ml.addWidget(sidebar)
+        ml.addWidget(self.pages, stretch=1)
+
+    def _switch(self, idx):
+        for i, b in enumerate(self.nav_btns):
+            b.setChecked(i == idx)
+        self.pages.setCurrentIndex(idx)
+
     def apply_theme(self):
         self.setStyleSheet("""
             QMainWindow { background: #0d1117; }
             QWidget { background: transparent; }
             QLabel { background: transparent; color: #e6edf3; }
+            QTextEdit { background: #161b22; color: #e6edf3; border: 1px solid #30363d; }
+            QLineEdit { background: #161b22; color: #e6edf3; border: 1px solid #30363d; padding: 4px; }
+            QPushButton { background: #21262d; color: #e6edf3; border: 1px solid #30363d; padding: 6px 12px; }
+            QPushButton:hover { background: #30363d; }
+            QComboBox { background: #161b22; color: #e6edf3; border: 1px solid #30363d; padding: 4px; }
+            QTableWidget { background: #161b22; color: #e6edf3; border: 1px solid #30363d; gridline-color: #30363d; }
+            QHeaderView::section { background: #21262d; color: #e6edf3; border: 1px solid #30363d; padding: 4px; }
+            QTreeWidget { background: #161b22; color: #e6edf3; border: 1px solid #30363d; }
+            QListWidget { background: #161b22; color: #e6edf3; border: 1px solid #30363d; }
+            QSplitter::handle { background: #30363d; }
         """)
 
 
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    
-    window = MainWindow()
-    window.show()
-    
+    w = MainWindow()
+    w.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
